@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>ja</string>
+    <key>CFBundleExecutable</key>
+    <string>ClaudeCodexUsageBar</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.example.ClaudeCodexUsageBar</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>ClaudeCodexUsageBar</string>
+    <key>CFBundleDisplayName</key>
+    <string>Claude Codex Usage Bar</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>12.0</string>
+    <!-- Dock アイコンを出さない（メニューバー専用アプリ） -->
+    <key>LSUIElement</key>
+    <true/>
+    <!-- ログイン時に自動起動するなら、後段で SMAppService に登録すること。
+         このフラグだけで自動起動はされない。 -->
+    <key>NSHumanReadableCopyright</key>
+    <string>© 2026</string>
+    <key>NSPrincipalClass</key>
+    <string>NSApplication</string>
+</dict>
+</plist>
