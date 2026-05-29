@@ -42,12 +42,12 @@ open build/ClaudeCodexUsageBar.app
 | 5h 枯渇時 | **次のリセット時刻まで待機**（取れない場合 1 時間後にリトライ） | 0% に張り付いている間に無駄打ちしない |
 | 時間帯外 | メニューバーに「自動更新は JST 09:30-21:00 のみ」と表示 | 手動更新（⌘R）はいつでも可能 |
 
-### 取得間隔を変更したい場合
+### 取得間隔・時刻を変更したい場合
 
 自動更新の間隔は `Sources/ClaudeCodexUsageBar/AppDelegate.swift` の先頭付近にある定数で変更できます。
 
 ```swift
-private let peakRefreshInterval: TimeInterval = 3 * 60      // peaktime (JST 11:00-16:00) の取得間隔
+private let peakRefreshInterval: TimeInterval = 3 * 60      // peaktime (11:00-16:00) の取得間隔
 private let normalRefreshInterval: TimeInterval = 5 * 60    // それ以外の取得間隔
 private let depletedFallbackRefreshInterval: TimeInterval = 60 * 60
 private let autoRefreshStartHour = 9
