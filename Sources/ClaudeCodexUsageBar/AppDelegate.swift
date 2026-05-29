@@ -136,7 +136,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let headerTrack = claudeHeaderTrack(from: tracks) ?? sorted.first!
             let codexPart = codexTitlePart()
             let resetSuffix = headerTrack.resetsAt == nil ? "" : "·\(shortReset(headerTrack))"
-            button.title = "Claude \(headerTrack.label) \(headerTrack.remainingPercent)%\(resetSuffix)\(codexPart)"
+            button.title = "Claude \(headerTrack.remainingPercent)%\(resetSuffix)\(codexPart)"
             let claudeTip = sorted.map { "\($0.label): 残り \($0.remainingPercent)%, リセット \($0.resetTimeString)" }
                 .joined(separator: "\n")
                 + "\n更新: \(formatTime(latest!.fetchedAt))"
@@ -168,7 +168,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func codexTitlePart() -> String {
         guard let fiveHour = latestCodex?.fiveHour else { return "" }
-        return " | Codex 5h \(fiveHour.remainingPercent)%·\(shortReset(fiveHour))"
+        return " | Codex \(fiveHour.remainingPercent)%·\(shortReset(fiveHour))"
     }
 
     private func codexToolTipPart() -> String {
