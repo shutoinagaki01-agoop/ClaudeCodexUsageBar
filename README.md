@@ -25,7 +25,7 @@ macOS のメニューバーに **Claude.ai** と **Codex (ChatGPT 内の Codex)*
 ## ビルド & 起動
 
 ```bash
-cd ~/Documents/ClaudeCodexUsageBar
+cd /path/to/ClaudeCodexUsageBar  # アプリの置き場所に移動
 chmod +x build.sh
 ./build.sh
 open build/ClaudeCodexUsageBar.app
