@@ -28,6 +28,9 @@ mkdir -p "$APP_DIR/Contents/Resources"
 
 cp "$BIN_PATH" "$APP_DIR/Contents/MacOS/$APP_NAME"
 cp Resources/Info.plist "$APP_DIR/Contents/Info.plist"
+if [[ -f ".env" ]]; then
+  cp .env "$APP_DIR/Contents/Resources/.env"
+fi
 
 # ad-hoc 署名（Gatekeeper の警告を緩和。Developer ID があるなら -s に置き換える）
 codesign --force --deep --sign - "$APP_DIR" || true

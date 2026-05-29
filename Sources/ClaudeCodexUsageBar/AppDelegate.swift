@@ -13,18 +13,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var latestCodexError: String?
     private var nextClaudeAutoRefreshAt: Date?
     private var nextCodexAutoRefreshAt: Date?
-
-    private let peakRefreshInterval: TimeInterval = 3 * 60
-    private let normalRefreshInterval: TimeInterval = 5 * 60
-    private let depletedFallbackRefreshInterval: TimeInterval = 60 * 60
-    private let resetRefreshBuffer: TimeInterval = 60
-    private let autoRefreshStartHour = 9
-    private let autoRefreshStartMinute = 30
-    private let autoRefreshEndHour = 21
-    private let autoRefreshEndMinute = 0
-    private let peakRefreshStartHour = 11
-    private let peakRefreshEndHour = 16
-    private let autoRefreshTimeZone = TimeZone(identifier: "Asia/Tokyo")!
+    private let config = AppConfig.load()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -394,17 +383,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func nextClaudeRefreshDate(after date: Date) -> Date {
         if isFiveHourDepleted(), let resetDate = nextFiveHourOrSevenDayReset(after: date) {
-            return resetDate.addingTimeInterval(resetRefreshBuffer)
+            return resetDate.addingTimeInterval(config.resetRefreshBuffer)
         }
-        let interval = isFiveHourDepleted() ? depletedFallbackRefreshInterval : refreshInterval(at: date)
+        let interval = isFiveHourDepleted() ? config.depletedFallbackRefreshInterval : refreshInterval(at: date)
         return date.addingTimeInterval(interval)
     }
 
     private func nextCodexRefreshDate(after date: Date) -> Date {
         if isCodexFiveHourDepleted(), let resetDate = nextCodexReset(after: date) {
-            return resetDate.addingTimeInterval(resetRefreshBuffer)
+            return resetDate.addingTimeInterval(config.resetRefreshBuffer)
         }
-        let interval = isCodexFiveHourDepleted() ? depletedFallbackRefreshInterval : refreshInterval(at: date)
+        let interval = isCodexFiveHourDepleted() ? config.depletedFallbackRefreshInterval : refreshInterval(at: date)
         return date.addingTimeInterval(interval)
     }
 
@@ -441,24 +430,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func isInAutoRefreshWindow(_ date: Date = Date()) -> Bool {
         let components = japanCalendar.dateComponents([.hour, .minute], from: date)
         let minuteOfDay = (components.hour ?? 0) * 60 + (components.minute ?? 0)
-        let start = autoRefreshStartHour * 60 + autoRefreshStartMinute
-        let end = autoRefreshEndHour * 60 + autoRefreshEndMinute
+        let start = config.autoRefreshStartHour * 60 + config.autoRefreshStartMinute
+        let end = config.autoRefreshEndHour * 60 + config.autoRefreshEndMinute
         return minuteOfDay >= start && minuteOfDay < end
     }
 
     private func refreshInterval(at date: Date) -> TimeInterval {
         let hour = japanCalendar.component(.hour, from: date)
-        if hour >= peakRefreshStartHour && hour < peakRefreshEndHour {
-            return peakRefreshInterval
+        if hour >= config.peakRefreshStartHour && hour < config.peakRefreshEndHour {
+            return config.peakRefreshInterval
         }
-        return normalRefreshInterval
+        return config.normalRefreshInterval
     }
 
     private func nextAutoRefreshStart(after date: Date) -> Date {
         let calendar = japanCalendar
         let startToday = calendar.date(
-            bySettingHour: autoRefreshStartHour,
-            minute: autoRefreshStartMinute,
+            bySettingHour: config.autoRefreshStartHour,
+            minute: config.autoRefreshStartMinute,
             second: 0,
             of: date
         )!
@@ -472,7 +461,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var japanCalendar: Calendar {
         var calendar = Calendar(identifier: .gregorian)
-        calendar.timeZone = autoRefreshTimeZone
+        calendar.timeZone = config.autoRefreshTimeZone
         return calendar
     }
 }

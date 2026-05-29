@@ -44,24 +44,32 @@ open build/ClaudeCodexUsageBar.app
 
 ### 取得間隔・時刻を変更したい場合
 
-自動更新の間隔は `Sources/ClaudeCodexUsageBar/AppDelegate.swift` の先頭付近にある定数で変更できます。
+自動更新の間隔や時間帯は `.env` で変更できます。まず `.env.template` をコピーして `.env` を作成します。
 
-```swift
-private let peakRefreshInterval: TimeInterval = 3 * 60      // peaktime (11:00-16:00) の取得間隔
-private let normalRefreshInterval: TimeInterval = 5 * 60    // それ以外の取得間隔
-private let depletedFallbackRefreshInterval: TimeInterval = 60 * 60
-private let autoRefreshStartHour = 9
-private let autoRefreshStartMinute = 30
-private let autoRefreshEndHour = 21
-private let autoRefreshEndMinute = 0
-private let peakRefreshStartHour = 11
-private let peakRefreshEndHour = 16
+```bash
+cp .env.template .env
 ```
 
-例: 通常時 10 分間隔にしたい場合は、以下のように変更します。
+`.env` には以下のような値を設定できます。
 
-```swift
-private let normalRefreshInterval: TimeInterval = 10 * 60
+```env
+PEAK_REFRESH_INTERVAL_SECONDS=180
+NORMAL_REFRESH_INTERVAL_SECONDS=300
+DEPLETED_FALLBACK_REFRESH_INTERVAL_SECONDS=3600
+RESET_REFRESH_BUFFER_SECONDS=60
+AUTO_REFRESH_START_HOUR=9
+AUTO_REFRESH_START_MINUTE=30
+AUTO_REFRESH_END_HOUR=21
+AUTO_REFRESH_END_MINUTE=0
+PEAK_REFRESH_START_HOUR=11
+PEAK_REFRESH_END_HOUR=16
+AUTO_REFRESH_TIME_ZONE=Asia/Tokyo
+```
+
+例: 通常時 10 分間隔にしたい場合は、`.env` を以下のように変更します。
+
+```env
+NORMAL_REFRESH_INTERVAL_SECONDS=600
 ```
 
 変更後は再ビルドしてください。
@@ -70,6 +78,8 @@ private let normalRefreshInterval: TimeInterval = 10 * 60
 ./build.sh
 open build/ClaudeCodexUsageBar.app
 ```
+
+`.env` は Git 管理対象外です。共有用の参考ファイルとして `.env.template` だけを GitHub に置いています。
 
 ## Claude の sessionKey の取り方
 
