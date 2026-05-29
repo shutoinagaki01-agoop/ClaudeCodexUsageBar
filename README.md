@@ -26,7 +26,7 @@ macOS のメニューバーに **Claude.ai** と **Codex (ChatGPT 内の Codex)*
 
 ```bash
 cd /path/to/ClaudeCodexUsageBar  # アプリの置き場所に移動
-cp .env.template .env # 時間設定用の .env ファイルを作成（必要に応じて編集）
+cp .env.template .env # 取得時間設定の .env ファイルを作成
 chmod +x build.sh
 ./build.sh
 open build/ClaudeCodexUsageBar.app
