@@ -122,18 +122,16 @@ final class UsageFetcher {
 
     private func buildTrack(label: String, from obj: [String: Any]) -> UsageTrack? {
         // 残量を求める。優先順位:
-        //  a) "utilization" を使う（= 使用済み比率なので 1 - util が残量）
-        //     値が 1.0 を超えていれば 0..100 のパーセント値、それ以下なら 0..1 の小数として解釈する。
-        //     実観測: claude.ai は {"utilization": 90.0} のようにパーセントで返す。
+        //  a) "utilization" を使う（= 0..100 の使用済みパーセントなので 1 - util/100 が残量）
+        //     実観測: claude.ai は {"utilization": 90.0} や {"utilization": 1.0} のように
+        //     パーセント値で返す。1.0 は 100% ではなく 1% 使用済みとして扱う。
         //  b) "remaining" / "remaining_fraction" がそのまま使える
         //  c) "used" + "total" / "limit" の組み合わせ
         var remaining: Double?
 
         if let util = numeric(obj["utilization"]), util >= 0 {
-            let usedFraction = util > 1.0 ? util / 100.0 : util
-            if usedFraction <= 1.0 {
-                remaining = 1.0 - usedFraction
-            }
+            let usedFraction = max(0, min(1, util / 100.0))
+            remaining = 1.0 - usedFraction
         }
         if remaining == nil, let r = numeric(obj["remaining_fraction"]), r >= 0, r <= 1 {
             remaining = r

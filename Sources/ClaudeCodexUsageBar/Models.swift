@@ -16,8 +16,10 @@ struct UsageTrack: Equatable {
     var resetTimeString: String {
         guard let resetsAt = resetsAt else { return "--:--" }
         let f = DateFormatter()
-        // 24時間以内なら HH:mm、それ以上なら M/d HH:mm
-        if abs(resetsAt.timeIntervalSinceNow) < 24 * 60 * 60 {
+        // 7d枠は日付が重要なので、24時間以内でも M/d HH:mm で表示する。
+        if label.hasPrefix("7d") {
+            f.dateFormat = "M/d HH:mm"
+        } else if abs(resetsAt.timeIntervalSinceNow) < 24 * 60 * 60 {
             f.dateFormat = "HH:mm"
         } else {
             f.dateFormat = "M/d HH:mm"
@@ -51,7 +53,9 @@ struct CodexUsageTrack: Equatable {
     var resetTimeString: String {
         guard let resetsAt = resetsAt else { return "--:--" }
         let f = DateFormatter()
-        if abs(resetsAt.timeIntervalSinceNow) < 24 * 60 * 60 {
+        if label.hasPrefix("7d") {
+            f.dateFormat = "M/d HH:mm"
+        } else if abs(resetsAt.timeIntervalSinceNow) < 24 * 60 * 60 {
             f.dateFormat = "HH:mm"
         } else {
             f.dateFormat = "M/d HH:mm"
