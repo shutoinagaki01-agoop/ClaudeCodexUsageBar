@@ -11,12 +11,6 @@ macOS のメニューバーに **Claude.ai** と **Codex (ChatGPT 内の Codex)*
 メニューを開くと、Claude / Codex それぞれの 5h・7d 各枠の残量と直近のリセット時刻、現在のプランが見られます。  
 (メニューバーには5hの残量とリセット時刻が表示されます)
 
-## ⚠️ 重要な制約
-
-- **Claude.ai には公式の使用量取得 API がありません**。ブラウザの `sessionKey` Cookie を使って内部エンドポイント (`/api/bootstrap/{org}/statsig`) を叩いて取得しています。`sessionKey` が失効すると 401 になるため、再ログインして貼り直してください。
-- **Codex の使用量取得も非公開エンドポイント** (`https://chatgpt.com/backend-api/codex/usage`) を利用しています。認証は Codex CLI が管理する `~/.codex/auth.json` の OAuth トークンを読み、401 時は `refresh_token` で自動再取得します。
-- 上記いずれも内部仕様変更で動かなくなる可能性があります。各サービスの利用規約と整合する個人利用の範囲でお使いください。
-
 ## 必要環境
 
 - macOS 12 (Monterey) 以降
@@ -26,8 +20,9 @@ macOS のメニューバーに **Claude.ai** と **Codex (ChatGPT 内の Codex)*
 ## ビルド & 起動
 
 ```bash
-cd /path/to/ClaudeCodexUsageBar  # アプリの置き場所に移動
-cp .env.template .env # 取得時間設定の .env ファイルを作成
+git clone https://github.com/shutoinagaki01-agoop/ClaudeCodexUsageBar.git # もしくは GitHub の Code > Download ZIP からダウンロード
+cd ClaudeCodexUsageBar  # アプリの置き場所に移動
+cp .env.template .env  # 取得時間設定の .env ファイルを作成
 chmod +x build.sh
 ./build.sh
 open build/ClaudeCodexUsageBar.app
@@ -160,6 +155,12 @@ ClaudeCodexUsageBar/
     └── Models.swift                    # UsageTrack / UsageSnapshot
                                         # CodexUsageTrack / CodexUsageSnapshot
 ```
+
+## ⚠️ 重要な制約
+
+- **Claude.ai には公式の使用量取得 API がありません**。ブラウザの `sessionKey` Cookie を使って内部エンドポイント (`/api/bootstrap/{org}/statsig`) を叩いて取得しています。`sessionKey` が失効すると 401 になるため、再ログインして貼り直してください。
+- **Codex の使用量取得も非公開エンドポイント** (`https://chatgpt.com/backend-api/codex/usage`) を利用しています。認証は Codex CLI が管理する `~/.codex/auth.json` の OAuth トークンを読み、401 時は `refresh_token` で自動再取得します。
+- 上記いずれも内部仕様変更で動かなくなる可能性があります。各サービスの利用規約と整合する個人利用の範囲でお使いください。
 
 ## エンドポイントが変わった時の直し方
 
