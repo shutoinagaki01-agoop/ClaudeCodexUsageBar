@@ -22,7 +22,6 @@ macOS のメニューバーに **Claude.ai** と **Codex (ChatGPT 内の Codex)*
 ```bash
 git clone https://github.com/shutoinagaki01-agoop/ClaudeCodexUsageBar.git # もしくは GitHub の Code > Download ZIP からダウンロード
 cd ClaudeCodexUsageBar  # アプリの置き場所に移動
-cp .env.template .env  # 取得時間設定の .env ファイルを作成
 chmod +x build.sh
 ./build.sh
 open build/ClaudeCodexUsageBar.app
@@ -41,42 +40,14 @@ open build/ClaudeCodexUsageBar.app
 
 ### 取得間隔・時刻を変更したい場合
 
-自動更新の間隔や時間帯は `.env` で変更できます。まず `.env.template` をコピーして `.env` を作成します。
+メニューバーのドロップダウンから **詳細設定 > 時間設定を変更…** を開くと、以下を変更できます。
 
-```bash
-cp .env.template .env # .envが無い場合のみ
-```
+- 起動時間（自動更新する時間帯）
+- ピーク時間
+- ピーク時の更新間隔
+- 通常時の更新間隔
 
-`.env` には以下のような値を設定できます。
-
-```env
-PEAK_REFRESH_INTERVAL_SECONDS=180
-NORMAL_REFRESH_INTERVAL_SECONDS=300
-DEPLETED_FALLBACK_REFRESH_INTERVAL_SECONDS=3600
-RESET_REFRESH_BUFFER_SECONDS=60
-AUTO_REFRESH_START_HOUR=9
-AUTO_REFRESH_START_MINUTE=30
-AUTO_REFRESH_END_HOUR=21
-AUTO_REFRESH_END_MINUTE=0
-PEAK_REFRESH_START_HOUR=11
-PEAK_REFRESH_END_HOUR=16
-AUTO_REFRESH_TIME_ZONE=Asia/Tokyo
-```
-
-例: 通常時 10 分間隔にしたい場合は、`.env` を以下のように変更します。
-
-```env
-NORMAL_REFRESH_INTERVAL_SECONDS=600
-```
-
-変更後は再ビルドしてください。
-
-```bash
-./build.sh
-open build/ClaudeCodexUsageBar.app
-```
-
-`.env` は Git 管理対象外です。共有用の参考ファイルとして `.env.template` だけを GitHub に置いています。
+設定は macOS の `UserDefaults` に保存されるため、変更後の再ビルドは不要です。
 
 ## Claude の sessionKey の取り方
 
@@ -132,6 +103,7 @@ Codex 更新: 14:21:08
 | Claude sessionKey を設定… | Cookie を更新 (`⌘,`) |
 | Claude デバッグJSONをFinderで開く | `~/Library/Application Support/ClaudeCodexUsageBar/last_response.json` を Finder で表示 (`⌘J`) |
 | Codex デバッグJSONをFinderで開く | `~/Library/Application Support/ClaudeCodexUsageBar/codex_usage_response.json` を表示 (`⌘K`) |
+| 詳細設定 > 時間設定を変更… | 起動時間、ピーク時間、更新間隔を変更 |
 | claude.ai を開く | ブラウザで開く (`⌘O`) |
 | 終了 | アプリ停止 (`⌘Q`) |
 
@@ -149,6 +121,7 @@ ClaudeCodexUsageBar/
 └── Sources/ClaudeCodexUsageBar/
     ├── main.swift                      # 起動
     ├── AppDelegate.swift               # NSStatusItem + メニュー + タイマー
+    ├── AppConfig.swift                 # 時間設定の UserDefaults 永続化
     ├── UsageFetcher.swift              # Claude.ai 用クライアント
     ├── CodexUsageFetcher.swift         # Codex (ChatGPT) 用クライアント
     ├── KeychainHelper.swift            # sessionKey の Keychain 永続化

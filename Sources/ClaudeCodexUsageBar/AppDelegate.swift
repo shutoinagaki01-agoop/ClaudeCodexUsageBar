@@ -13,7 +13,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var latestCodexError: String?
     private var nextClaudeAutoRefreshAt: Date?
     private var nextCodexAutoRefreshAt: Date?
-    private let config = AppConfig.load()
+    private var config = AppConfig.load()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -116,6 +116,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         addAction(to: menu, title: "Claude sessionKey を設定…", selector: #selector(setSessionKeyAction), key: ",")
         addAction(to: menu, title: "Claude デバッグJSONをFinderで開く", selector: #selector(revealDumpAction), key: "j")
         addAction(to: menu, title: "Codex デバッグJSONをFinderで開く", selector: #selector(revealCodexDumpAction), key: "k")
+        addSettingsSubmenu(to: menu)
 
         menu.addItem(.separator())
         addAction(to: menu, title: "ClaudeCodexUsageBar を終了", selector: #selector(quitAction), key: "q")
@@ -126,6 +127,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func addAction(to menu: NSMenu, title: String, selector: Selector, key: String) {
         let item = NSMenuItem(title: title, action: selector, keyEquivalent: key)
         item.target = self
+        menu.addItem(item)
+    }
+
+    private func addSettingsSubmenu(to menu: NSMenu) {
+        let parent = NSMenuItem(title: "詳細設定", action: nil, keyEquivalent: "")
+        let submenu = NSMenu()
+
+        addDisabledItem(to: submenu, title: "起動時間: \(config.autoRefreshWindowLabel)")
+        addDisabledItem(to: submenu, title: "ピーク時間: \(config.peakWindowLabel)")
+        addDisabledItem(to: submenu, title: "ピーク時更新間隔: \(formatInterval(config.peakRefreshInterval))")
+        addDisabledItem(to: submenu, title: "通常時更新間隔: \(formatInterval(config.normalRefreshInterval))")
+        submenu.addItem(.separator())
+        let edit = NSMenuItem(title: "時間設定を変更…", action: #selector(editTimeSettingsAction), keyEquivalent: "")
+        edit.target = self
+        submenu.addItem(edit)
+
+        menu.setSubmenu(submenu, for: parent)
+        menu.addItem(parent)
+    }
+
+    private func addDisabledItem(to menu: NSMenu, title: String) {
+        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        item.isEnabled = false
         menu.addItem(item)
     }
 
@@ -213,10 +237,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let f = DateFormatter(); f.dateFormat = "HH:mm:ss"; return f.string(from: d)
     }
 
+    private func formatInterval(_ interval: TimeInterval) -> String {
+        let seconds = Int(interval)
+        if seconds % 60 == 0 {
+            return "\(seconds / 60)分"
+        }
+        return "\(seconds)秒"
+    }
+
     // MARK: - アクション
 
     @objc private func refreshAction() { refreshNow() }
     @objc private func quitAction() { NSApp.terminate(nil) }
+
+    @objc private func editTimeSettingsAction() {
+        promptForTimeSettings()
+    }
 
     @objc private func revealDumpAction() {
         let url = DebugDump.lastResponseURL
@@ -262,6 +298,105 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    private func promptForTimeSettings() {
+        let autoStart = NSTextField(string: AppConfig.formatTime(hour: config.autoRefreshStartHour, minute: config.autoRefreshStartMinute))
+        let autoEnd = NSTextField(string: AppConfig.formatTime(hour: config.autoRefreshEndHour, minute: config.autoRefreshEndMinute))
+        let peakStart = NSTextField(string: AppConfig.formatTime(hour: config.peakRefreshStartHour, minute: config.peakRefreshStartMinute))
+        let peakEnd = NSTextField(string: AppConfig.formatTime(hour: config.peakRefreshEndHour, minute: config.peakRefreshEndMinute))
+        let peakInterval = NSTextField(string: "\(Int(config.peakRefreshInterval / 60))")
+        let normalInterval = NSTextField(string: "\(Int(config.normalRefreshInterval / 60))")
+
+        let fields: [(String, NSTextField)] = [
+            ("起動時間 開始 (HH:mm)", autoStart),
+            ("起動時間 終了 (HH:mm)", autoEnd),
+            ("ピーク時間 開始 (HH:mm)", peakStart),
+            ("ピーク時間 終了 (HH:mm)", peakEnd),
+            ("ピーク時 更新間隔 (分)", peakInterval),
+            ("通常時 更新間隔 (分)", normalInterval),
+        ]
+
+        let form = NSView(frame: NSRect(x: 0, y: 0, width: 420, height: 184))
+        for (index, pair) in fields.enumerated() {
+            let y = 154 - (index * 30)
+            let label = NSTextField(labelWithString: pair.0)
+            label.alignment = .right
+            label.frame = NSRect(x: 0, y: y, width: 210, height: 22)
+            pair.1.frame = NSRect(x: 222, y: y - 2, width: 120, height: 24)
+            form.addSubview(label)
+            form.addSubview(pair.1)
+        }
+
+        let alert = NSAlert()
+        alert.messageText = "時間設定"
+        alert.informativeText = "自動取得する時間帯、ピーク時間帯、更新間隔を変更できます。"
+        alert.addButton(withTitle: "保存")
+        alert.addButton(withTitle: "キャンセル")
+        alert.accessoryView = form
+        NSApp.activate(ignoringOtherApps: true)
+
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        do {
+            let autoStartTime = try parseClock(autoStart.stringValue, fieldName: "起動時間 開始")
+            let autoEndTime = try parseClock(autoEnd.stringValue, fieldName: "起動時間 終了")
+            let peakStartTime = try parseClock(peakStart.stringValue, fieldName: "ピーク時間 開始")
+            let peakEndTime = try parseClock(peakEnd.stringValue, fieldName: "ピーク時間 終了")
+            let peakMinutes = try parsePositiveMinutes(peakInterval.stringValue, fieldName: "ピーク時 更新間隔")
+            let normalMinutes = try parsePositiveMinutes(normalInterval.stringValue, fieldName: "通常時 更新間隔")
+
+            config = AppConfig(
+                peakRefreshInterval: TimeInterval(peakMinutes * 60),
+                normalRefreshInterval: TimeInterval(normalMinutes * 60),
+                depletedFallbackRefreshInterval: config.depletedFallbackRefreshInterval,
+                resetRefreshBuffer: config.resetRefreshBuffer,
+                autoRefreshStartHour: autoStartTime.hour,
+                autoRefreshStartMinute: autoStartTime.minute,
+                autoRefreshEndHour: autoEndTime.hour,
+                autoRefreshEndMinute: autoEndTime.minute,
+                peakRefreshStartHour: peakStartTime.hour,
+                peakRefreshStartMinute: peakStartTime.minute,
+                peakRefreshEndHour: peakEndTime.hour,
+                peakRefreshEndMinute: peakEndTime.minute,
+                autoRefreshTimeZone: config.autoRefreshTimeZone
+            )
+            config.save()
+            scheduleNextClaudeAutoRefresh()
+            scheduleNextCodexAutoRefresh()
+            rebuildMenu()
+        } catch {
+            showValidationError(error.localizedDescription)
+        }
+    }
+
+    private func parseClock(_ raw: String, fieldName: String) throws -> (hour: Int, minute: Int) {
+        let parts = raw.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: ":", maxSplits: 1)
+        guard parts.count == 2,
+              let hour = Int(parts[0]),
+              let minute = Int(parts[1]),
+              (0...23).contains(hour),
+              (0...59).contains(minute)
+        else {
+            throw SettingsValidationError.invalidValue("\(fieldName) は HH:mm 形式で入力してください。")
+        }
+        return (hour, minute)
+    }
+
+    private func parsePositiveMinutes(_ raw: String, fieldName: String) throws -> Int {
+        guard let minutes = Int(raw.trimmingCharacters(in: .whitespacesAndNewlines)), minutes > 0 else {
+            throw SettingsValidationError.invalidValue("\(fieldName) は 1 以上の分数で入力してください。")
+        }
+        return minutes
+    }
+
+    private func showValidationError(_ message: String) {
+        let alert = NSAlert()
+        alert.messageText = "設定を保存できません"
+        alert.informativeText = message
+        alert.addButton(withTitle: "OK")
+        NSApp.activate(ignoringOtherApps: true)
+        alert.runModal()
+    }
+
     // MARK: - データ取得
 
     private func refreshNow() {
@@ -271,7 +406,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func refreshClaude(isAutomatic: Bool = false) {
         if isAutomatic && !isInAutoRefreshWindow() {
-            latestError = "自動更新は JST 09:30-21:00 のみ"
+            latestError = "自動更新は JST \(config.autoRefreshWindowLabel) のみ"
             updateTitle()
             scheduleNextClaudeAutoRefresh()
             rebuildMenu()
@@ -306,7 +441,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func refreshCodex(isAutomatic: Bool = false) {
         if isAutomatic && !isInAutoRefreshWindow() {
-            latestCodexError = "自動更新は JST 09:30-21:00 のみ"
+            latestCodexError = "自動更新は JST \(config.autoRefreshWindowLabel) のみ"
             updateTitle()
             scheduleNextCodexAutoRefresh()
             rebuildMenu()
@@ -436,8 +571,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func refreshInterval(at date: Date) -> TimeInterval {
-        let hour = japanCalendar.component(.hour, from: date)
-        if hour >= config.peakRefreshStartHour && hour < config.peakRefreshEndHour {
+        let components = japanCalendar.dateComponents([.hour, .minute], from: date)
+        let minuteOfDay = (components.hour ?? 0) * 60 + (components.minute ?? 0)
+        let start = config.peakRefreshStartHour * 60 + config.peakRefreshStartMinute
+        let end = config.peakRefreshEndHour * 60 + config.peakRefreshEndMinute
+        if minuteOfDay >= start && minuteOfDay < end {
             return config.peakRefreshInterval
         }
         return config.normalRefreshInterval
@@ -463,5 +601,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = config.autoRefreshTimeZone
         return calendar
+    }
+}
+
+private enum SettingsValidationError: LocalizedError {
+    case invalidValue(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidValue(let message): return message
+        }
     }
 }
