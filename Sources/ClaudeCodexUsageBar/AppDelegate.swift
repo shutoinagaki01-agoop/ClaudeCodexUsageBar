@@ -116,7 +116,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
 
         addAction(to: menu, title: "Claude/Codexの残量を手動で更新", selector: #selector(refreshAction), key: "r")
-        addAction(to: menu, title: "Claude sessionKey を設定…", selector: #selector(setSessionKeyAction), key: ",")
         addDataSubmenu(to: menu)
         addSettingsSubmenu(to: menu)
 
@@ -149,6 +148,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         addDisabledItem(to: submenu, title: "ピーク時間: \(config.peakWindowLabel)")
         addDisabledItem(to: submenu, title: "ピーク時更新間隔: \(formatInterval(config.peakRefreshInterval))")
         addDisabledItem(to: submenu, title: "通常時更新間隔: \(formatInterval(config.normalRefreshInterval))")
+        submenu.addItem(.separator())
+        let sessionKey = NSMenuItem(title: "Claude sessionKey を設定…", action: #selector(setSessionKeyAction), keyEquivalent: ",")
+        sessionKey.target = self
+        submenu.addItem(sessionKey)
         submenu.addItem(.separator())
         addClaudeOrgSubmenu(to: submenu)
         let reloadOrgs = NSMenuItem(title: "Claude org一覧を再読み込み", action: #selector(reloadClaudeOrganizationsAction), keyEquivalent: "")

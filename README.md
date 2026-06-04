@@ -106,7 +106,7 @@ Codex 更新: 14:21:08
 | 項目 | 動作 |
 |---|---|
 | Claude/Codexの残量を手動で更新 | 即座に両方を再取得 (`⌘R`) |
-| Claude sessionKey を設定… | Cookie を更新 (`⌘,`) |
+| 詳細設定 > Claude sessionKey を設定… | Cookie を更新 (`⌘,`) |
 | 取得データをFinderで開く > Claude | `~/Library/Application Support/ClaudeCodexUsageBar/last_response.json` を Finder で表示 (`⌘J`) |
 | 取得データをFinderで開く > Codex | `~/Library/Application Support/ClaudeCodexUsageBar/codex_usage_response.json` を表示 (`⌘K`) |
 | 詳細設定 > Claude orgを選択 | Claude の使用量取得元 org を変更 |
@@ -208,7 +208,7 @@ ClaudeCodexUsageBar/
 | 症状 | 対処 |
 |---|---|
 | 起動時に「Keychainログイン」のパスワードを聞かれる | macOS が ad-hoc 署名アプリの Keychain アクセスを確認している正常動作。「**常に許可**」を押す。`./build.sh` で再ビルドすると署名ハッシュが変わるためまた聞かれる |
-| 「sessionKey が未設定です」 | メニューから「Claude sessionKey を設定…」を選び、claude.ai の Cookie を貼り付け |
+| 「sessionKey が未設定です」 | メニューから「詳細設定 > Claude sessionKey を設定…」を選び、claude.ai の Cookie を貼り付け |
 | 「認証エラー (401)」 | sessionKey が失効。claude.ai に再ログインして貼り直し |
 | 「Codex auth not found」 | `codex login` を実行して `~/.codex/auth.json` を作る |
 | 「usage tracks not found」 | claude.ai 側の仕様変更の可能性。⌘J で生 JSON を確認して `UsageFetcher.swift` を更新 |
