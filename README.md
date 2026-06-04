@@ -59,6 +59,12 @@ open build/ClaudeCodexUsageBar.app
 
 保存先は macOS Keychain (service: `com.example.ClaudeCodexUsageBar`)。
 
+### Claude org / プランを選択したい場合
+
+Claude で複数の org / プランに所属している場合は、メニューバーのドロップダウンから **詳細設定 > Claude orgを選択** を開き、使用量を確認したい org を選択してください。
+
+選択した org は macOS の `UserDefaults` に保存され、次回以降も同じ org の使用量を取得します。org 一覧が表示されない場合は **詳細設定 > Claude org一覧を再読み込み** を実行してください。
+
 ## Codex の認証
 
 Codex CLI が `~/.codex/auth.json` に書き出す OAuth トークンを再利用します。アプリ側に追加で設定は不要です。
@@ -103,6 +109,8 @@ Codex 更新: 14:21:08
 | Claude sessionKey を設定… | Cookie を更新 (`⌘,`) |
 | Claude 取得データをFinderで開く | `~/Library/Application Support/ClaudeCodexUsageBar/last_response.json` を Finder で表示 (`⌘J`) |
 | Codex 取得データをFinderで開く | `~/Library/Application Support/ClaudeCodexUsageBar/codex_usage_response.json` を表示 (`⌘K`) |
+| 詳細設定 > Claude orgを選択 | Claude の使用量取得元 org を変更 |
+| 詳細設定 > Claude org一覧を再読み込み | Claude org 一覧を再取得 |
 | 詳細設定 > 時間設定を変更… | 起動時間、ピーク時間、更新間隔を変更 |
 | claude.ai を開く | ブラウザで開く (`⌘O`) |
 | 終了 | アプリ停止 (`⌘Q`) |

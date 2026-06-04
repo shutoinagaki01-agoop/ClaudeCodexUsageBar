@@ -11,6 +11,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var latestCodex: CodexUsageSnapshot?
     private var latestError: String?
     private var latestCodexError: String?
+    private var latestClaudeOrganizations: [ClaudeOrganization] = []
+    private var latestClaudeOrganizationsError: String?
     private var nextClaudeAutoRefreshAt: Date?
     private var nextCodexAutoRefreshAt: Date?
     private var config = AppConfig.load()
@@ -23,6 +25,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         rebuildMenu()
+        loadClaudeOrganizations()
 
         if KeychainHelper.load() == nil {
             promptForSessionKey(reason: "初回セットアップ: claude.ai の sessionKey を貼り付けてください")
@@ -139,9 +142,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         addDisabledItem(to: submenu, title: "ピーク時更新間隔: \(formatInterval(config.peakRefreshInterval))")
         addDisabledItem(to: submenu, title: "通常時更新間隔: \(formatInterval(config.normalRefreshInterval))")
         submenu.addItem(.separator())
+        addClaudeOrgSubmenu(to: submenu)
+        let reloadOrgs = NSMenuItem(title: "Claude org一覧を再読み込み", action: #selector(reloadClaudeOrganizationsAction), keyEquivalent: "")
+        reloadOrgs.target = self
+        submenu.addItem(reloadOrgs)
+        submenu.addItem(.separator())
         let edit = NSMenuItem(title: "時間設定を変更…", action: #selector(editTimeSettingsAction), keyEquivalent: "")
         edit.target = self
         submenu.addItem(edit)
+
+        menu.setSubmenu(submenu, for: parent)
+        menu.addItem(parent)
+    }
+
+    private func addClaudeOrgSubmenu(to menu: NSMenu) {
+        let title = selectedClaudeOrganization().map { "Claude org: \($0.displayName)" } ?? "Claude orgを選択"
+        let parent = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        let submenu = NSMenu()
+
+        if latestClaudeOrganizations.isEmpty {
+            let message = latestClaudeOrganizationsError ?? "org一覧を取得中…"
+            addDisabledItem(to: submenu, title: message)
+        } else {
+            for org in latestClaudeOrganizations {
+                let item = NSMenuItem(title: org.displayName, action: #selector(selectClaudeOrganizationAction(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = org.uuid
+                item.state = org.uuid == selectedClaudeOrgUUID() ? .on : .off
+                submenu.addItem(item)
+            }
+        }
 
         menu.setSubmenu(submenu, for: parent)
         menu.addItem(parent)
@@ -254,6 +284,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         promptForTimeSettings()
     }
 
+    @objc private func reloadClaudeOrganizationsAction() {
+        loadClaudeOrganizations()
+    }
+
+    @objc private func selectClaudeOrganizationAction(_ sender: NSMenuItem) {
+        guard let uuid = sender.representedObject as? String else { return }
+        config = config.withSelectedClaudeOrgUUID(uuid)
+        config.save()
+        latest = nil
+        latestError = "Claude 取得中…"
+        rebuildMenu()
+        refreshClaude()
+    }
+
     @objc private func revealDumpAction() {
         let url = DebugDump.lastResponseURL
         if FileManager.default.fileExists(atPath: url.path) {
@@ -293,6 +337,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let v = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
             if !v.isEmpty {
                 KeychainHelper.save(v)
+                loadClaudeOrganizations()
                 refreshClaude()
             }
         }
@@ -357,7 +402,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 peakRefreshStartMinute: peakStartTime.minute,
                 peakRefreshEndHour: peakEndTime.hour,
                 peakRefreshEndMinute: peakEndTime.minute,
-                autoRefreshTimeZone: config.autoRefreshTimeZone
+                autoRefreshTimeZone: config.autoRefreshTimeZone,
+                selectedClaudeOrgUUID: config.selectedClaudeOrgUUID
             )
             config.save()
             scheduleNextClaudeAutoRefresh()
@@ -404,6 +450,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         refreshCodex()
     }
 
+    private func loadClaudeOrganizations() {
+        guard KeychainHelper.load()?.isEmpty == false else { return }
+        latestClaudeOrganizationsError = nil
+        Task { [weak self] in
+            guard let self = self else { return }
+            do {
+                let organizations = try await self.fetcher.fetchOrganizations()
+                await MainActor.run {
+                    self.latestClaudeOrganizations = organizations
+                    self.latestClaudeOrganizationsError = nil
+                    if self.config.selectedClaudeOrgUUID == nil, let first = organizations.first {
+                        self.config = self.config.withSelectedClaudeOrgUUID(first.uuid)
+                        self.config.save()
+                    } else if let selected = self.config.selectedClaudeOrgUUID,
+                              !organizations.contains(where: { $0.uuid == selected }),
+                              let first = organizations.first {
+                        self.config = self.config.withSelectedClaudeOrgUUID(first.uuid)
+                        self.config.save()
+                    }
+                    self.rebuildMenu()
+                }
+            } catch {
+                await MainActor.run {
+                    self.latestClaudeOrganizationsError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                    self.rebuildMenu()
+                }
+            }
+        }
+    }
+
     private func refreshClaude(isAutomatic: Bool = false) {
         if isAutomatic && !isInAutoRefreshWindow() {
             latestError = "自動更新は JST \(config.autoRefreshWindowLabel) のみ"
@@ -420,7 +496,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Task { [weak self] in
             guard let self = self else { return }
             do {
-                let snap = try await self.fetcher.fetchUsage()
+                let snap = try await self.fetcher.fetchUsage(preferredOrgUUID: self.config.selectedClaudeOrgUUID)
                 await MainActor.run {
                     self.latest = snap
                     self.latestError = nil
@@ -601,6 +677,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = config.autoRefreshTimeZone
         return calendar
+    }
+
+    private func selectedClaudeOrgUUID() -> String? {
+        config.selectedClaudeOrgUUID ?? latestClaudeOrganizations.first?.uuid
+    }
+
+    private func selectedClaudeOrganization() -> ClaudeOrganization? {
+        guard let uuid = selectedClaudeOrgUUID() else { return nil }
+        return latestClaudeOrganizations.first(where: { $0.uuid == uuid })
     }
 }
 

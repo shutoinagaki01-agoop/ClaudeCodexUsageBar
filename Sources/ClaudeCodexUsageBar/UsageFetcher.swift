@@ -33,13 +33,13 @@ final class UsageFetcher {
         self.session = URLSession(configuration: config)
     }
 
-    func fetchUsage() async throws -> UsageSnapshot {
+    func fetchUsage(preferredOrgUUID: String? = nil) async throws -> UsageSnapshot {
         guard let sessionKey = KeychainHelper.load(), !sessionKey.isEmpty else {
             throw FetchError.missingSessionKey
         }
 
         // Step 1: 組織 UUID を取得
-        let orgUUID = try await fetchOrgUUID(sessionKey: sessionKey)
+        let orgUUID = try await resolveOrgUUID(sessionKey: sessionKey, preferredOrgUUID: preferredOrgUUID)
 
         // Step 2: 利用量を取得（複数エンドポイントを順に試す）
         // 最初に bootstrap/statsig を試す。実観測でここに使用量が含まれていた。
@@ -68,17 +68,35 @@ final class UsageFetcher {
 
     // MARK: - Step 1
 
-    private func fetchOrgUUID(sessionKey: String) async throws -> String {
+    func fetchOrganizations() async throws -> [ClaudeOrganization] {
+        guard let sessionKey = KeychainHelper.load(), !sessionKey.isEmpty else {
+            throw FetchError.missingSessionKey
+        }
+        return try await fetchOrganizations(sessionKey: sessionKey)
+    }
+
+    private func resolveOrgUUID(sessionKey: String, preferredOrgUUID: String?) async throws -> String {
+        let organizations = try await fetchOrganizations(sessionKey: sessionKey)
+        if let preferredOrgUUID,
+           organizations.contains(where: { $0.uuid == preferredOrgUUID }) {
+            return preferredOrgUUID
+        }
+        guard let first = organizations.first else {
+            throw FetchError.organizationNotFound
+        }
+        return first.uuid
+    }
+
+    private func fetchOrganizations(sessionKey: String) async throws -> [ClaudeOrganization] {
         let url = URL(string: "https://claude.ai/api/organizations")!
         let data = try await get(url: url, sessionKey: sessionKey)
 
-        guard let arr = try JSONSerialization.jsonObject(with: data) as? [[String: Any]],
-              let first = arr.first,
-              let uuid = first["uuid"] as? String
-        else {
+        guard let arr = try JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
             throw FetchError.organizationNotFound
         }
-        return uuid
+        let organizations = arr.compactMap(ClaudeOrganization.init(json:))
+        guard !organizations.isEmpty else { throw FetchError.organizationNotFound }
+        return organizations
     }
 
     // MARK: - Step 2: 候補 URL

@@ -15,6 +15,7 @@ struct AppConfig {
     let peakRefreshEndHour: Int
     let peakRefreshEndMinute: Int
     let autoRefreshTimeZone: TimeZone
+    let selectedClaudeOrgUUID: String?
 
     static func load() -> AppConfig {
         let defaults = UserDefaults.standard
@@ -31,7 +32,8 @@ struct AppConfig {
             peakRefreshStartMinute: defaults.integer(forKey: Keys.peakRefreshStartMinute, default: 0),
             peakRefreshEndHour: defaults.integer(forKey: Keys.peakRefreshEndHour, default: 16),
             peakRefreshEndMinute: defaults.integer(forKey: Keys.peakRefreshEndMinute, default: 0),
-            autoRefreshTimeZone: TimeZone(identifier: "Asia/Tokyo")!
+            autoRefreshTimeZone: TimeZone(identifier: "Asia/Tokyo")!,
+            selectedClaudeOrgUUID: defaults.string(forKey: Keys.selectedClaudeOrgUUID)
         )
     }
 
@@ -47,6 +49,30 @@ struct AppConfig {
         defaults.set(peakRefreshStartMinute, forKey: Keys.peakRefreshStartMinute)
         defaults.set(peakRefreshEndHour, forKey: Keys.peakRefreshEndHour)
         defaults.set(peakRefreshEndMinute, forKey: Keys.peakRefreshEndMinute)
+        if let selectedClaudeOrgUUID, !selectedClaudeOrgUUID.isEmpty {
+            defaults.set(selectedClaudeOrgUUID, forKey: Keys.selectedClaudeOrgUUID)
+        } else {
+            defaults.removeObject(forKey: Keys.selectedClaudeOrgUUID)
+        }
+    }
+
+    func withSelectedClaudeOrgUUID(_ uuid: String?) -> AppConfig {
+        AppConfig(
+            peakRefreshInterval: peakRefreshInterval,
+            normalRefreshInterval: normalRefreshInterval,
+            depletedFallbackRefreshInterval: depletedFallbackRefreshInterval,
+            resetRefreshBuffer: resetRefreshBuffer,
+            autoRefreshStartHour: autoRefreshStartHour,
+            autoRefreshStartMinute: autoRefreshStartMinute,
+            autoRefreshEndHour: autoRefreshEndHour,
+            autoRefreshEndMinute: autoRefreshEndMinute,
+            peakRefreshStartHour: peakRefreshStartHour,
+            peakRefreshStartMinute: peakRefreshStartMinute,
+            peakRefreshEndHour: peakRefreshEndHour,
+            peakRefreshEndMinute: peakRefreshEndMinute,
+            autoRefreshTimeZone: autoRefreshTimeZone,
+            selectedClaudeOrgUUID: uuid
+        )
     }
 
     var autoRefreshWindowLabel: String {
@@ -76,6 +102,7 @@ struct AppConfig {
         static let peakRefreshStartMinute = "settings.peakRefreshStartMinute"
         static let peakRefreshEndHour = "settings.peakRefreshEndHour"
         static let peakRefreshEndMinute = "settings.peakRefreshEndMinute"
+        static let selectedClaudeOrgUUID = "settings.selectedClaudeOrgUUID"
     }
 }
 

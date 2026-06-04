@@ -1,5 +1,48 @@
 import Foundation
 
+struct ClaudeOrganization: Equatable {
+    let uuid: String
+    let name: String
+    let plan: String?
+
+    var displayName: String {
+        if let plan, !plan.isEmpty {
+            return "\(name) (\(plan))"
+        }
+        return name
+    }
+
+    init?(json: [String: Any]) {
+        guard let uuid = json["uuid"] as? String, !uuid.isEmpty else { return nil }
+        self.uuid = uuid
+        self.name = Self.firstString(in: json, keys: ["name", "display_name", "organization_name", "title"])
+            ?? "Claude org"
+        self.plan = Self.extractPlan(from: json)
+    }
+
+    private static func firstString(in json: [String: Any], keys: [String]) -> String? {
+        for key in keys {
+            if let value = json[key] as? String, !value.isEmpty {
+                return value
+            }
+        }
+        return nil
+    }
+
+    private static func extractPlan(from json: [String: Any]) -> String? {
+        if let value = firstString(in: json, keys: ["plan", "plan_type", "subscription_plan", "account_plan"]) {
+            return value
+        }
+        for key in ["subscription", "billing", "plan"] {
+            if let obj = json[key] as? [String: Any],
+               let value = firstString(in: obj, keys: ["name", "type", "plan", "plan_type"]) {
+                return value
+            }
+        }
+        return nil
+    }
+}
+
 /// 単一の使用量トラック（例: 「7日間 Sonnet 上限」）。
 struct UsageTrack: Equatable {
     /// 表示用ラベル（例: "7d Sonnet"）
