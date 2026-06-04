@@ -114,8 +114,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         addAction(to: menu, title: "Claude/Codexの残量を手動で更新", selector: #selector(refreshAction), key: "r")
         addAction(to: menu, title: "Claude sessionKey を設定…", selector: #selector(setSessionKeyAction), key: ",")
-        addAction(to: menu, title: "Claude デバッグJSONをFinderで開く", selector: #selector(revealDumpAction), key: "j")
-        addAction(to: menu, title: "Codex デバッグJSONをFinderで開く", selector: #selector(revealCodexDumpAction), key: "k")
+        addAction(to: menu, title: "Claude 取得データをFinderで開く", selector: #selector(revealDumpAction), key: "j")
+        addAction(to: menu, title: "Codex 取得データをFinderで開く", selector: #selector(revealCodexDumpAction), key: "k")
         addSettingsSubmenu(to: menu)
 
         menu.addItem(.separator())

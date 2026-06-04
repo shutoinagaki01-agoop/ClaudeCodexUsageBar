@@ -101,8 +101,8 @@ Codex 更新: 14:21:08
 |---|---|
 | Claude/Codexの残量を手動で更新 | 即座に両方を再取得 (`⌘R`) |
 | Claude sessionKey を設定… | Cookie を更新 (`⌘,`) |
-| Claude デバッグJSONをFinderで開く | `~/Library/Application Support/ClaudeCodexUsageBar/last_response.json` を Finder で表示 (`⌘J`) |
-| Codex デバッグJSONをFinderで開く | `~/Library/Application Support/ClaudeCodexUsageBar/codex_usage_response.json` を表示 (`⌘K`) |
+| Claude 取得データをFinderで開く | `~/Library/Application Support/ClaudeCodexUsageBar/last_response.json` を Finder で表示 (`⌘J`) |
+| Codex 取得データをFinderで開く | `~/Library/Application Support/ClaudeCodexUsageBar/codex_usage_response.json` を表示 (`⌘K`) |
 | 詳細設定 > 時間設定を変更… | 起動時間、ピーク時間、更新間隔を変更 |
 | claude.ai を開く | ブラウザで開く (`⌘O`) |
 | 終了 | アプリ停止 (`⌘Q`) |
@@ -139,7 +139,7 @@ ClaudeCodexUsageBar/
 
 ### Claude
 
-1. メニューバー → **「Claude デバッグJSONをFinderで開く」** (`⌘J`) で `last_response.json` を確認
+1. メニューバー → **「Claude 取得データをFinderで開く」** (`⌘J`) で `last_response.json` を確認
 2. または discovery スクリプトで複数候補を一度に観察:
    ```bash
    ./scripts/discover.sh "$(security find-generic-password -s com.example.ClaudeCodexUsageBar -w)"
