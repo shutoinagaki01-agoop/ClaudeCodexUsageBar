@@ -117,8 +117,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         addAction(to: menu, title: "Claude/Codexの残量を手動で更新", selector: #selector(refreshAction), key: "r")
         addAction(to: menu, title: "Claude sessionKey を設定…", selector: #selector(setSessionKeyAction), key: ",")
-        addAction(to: menu, title: "Claude 取得データをFinderで開く", selector: #selector(revealDumpAction), key: "j")
-        addAction(to: menu, title: "Codex 取得データをFinderで開く", selector: #selector(revealCodexDumpAction), key: "k")
+        addDataSubmenu(to: menu)
         addSettingsSubmenu(to: menu)
 
         menu.addItem(.separator())
@@ -131,6 +130,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let item = NSMenuItem(title: title, action: selector, keyEquivalent: key)
         item.target = self
         menu.addItem(item)
+    }
+
+    private func addDataSubmenu(to menu: NSMenu) {
+        let parent = NSMenuItem(title: "取得データをFinderで開く", action: nil, keyEquivalent: "")
+        let submenu = NSMenu()
+        addAction(to: submenu, title: "Claude", selector: #selector(revealDumpAction), key: "j")
+        addAction(to: submenu, title: "Codex", selector: #selector(revealCodexDumpAction), key: "k")
+        menu.setSubmenu(submenu, for: parent)
+        menu.addItem(parent)
     }
 
     private func addSettingsSubmenu(to menu: NSMenu) {
