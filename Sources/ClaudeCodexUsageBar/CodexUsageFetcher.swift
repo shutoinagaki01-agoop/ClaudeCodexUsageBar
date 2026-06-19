@@ -9,6 +9,8 @@ final class CodexUsageFetcher {
     private let session: URLSession
     private let authURL: URL
     private let usageURL = URL(string: "https://chatgpt.com/backend-api/codex/usage")!
+    private let resetCreditListURL = URL(string: "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits")!
+    private let resetCreditConsumeURL = URL(string: "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume")!
     private let tokenURL = URL(string: "https://auth.openai.com/oauth/token")!
     private let clientID = "app_EMoamEEZ73f0CkXaXp7hrann"
 
@@ -35,6 +37,17 @@ final class CodexUsageFetcher {
             let data = try await getUsage(accessToken: refreshed, accountID: auth.accountID)
             DebugDump.writeCodex(data: prettyJSON(data) ?? data)
             return try decodeUsage(data)
+        }
+    }
+
+    func consumeRateLimitResetCredit() async throws {
+        let auth = try loadAuth()
+
+        do {
+            try await consumeRateLimitResetCredit(accessToken: auth.accessToken, accountID: auth.accountID)
+        } catch FetchError.unauthorized {
+            let refreshed = try await refreshAccessToken(refreshToken: auth.refreshToken)
+            try await consumeRateLimitResetCredit(accessToken: refreshed, accountID: auth.accountID)
         }
     }
 
@@ -82,6 +95,88 @@ final class CodexUsageFetcher {
         }
     }
 
+    private func consumeRateLimitResetCredit(accessToken: String, accountID: String?) async throws {
+        let creditID = try await firstAvailableResetCreditID(accessToken: accessToken, accountID: accountID)
+        try await postResetCredit(
+            accessToken: accessToken,
+            accountID: accountID,
+            creditID: creditID,
+            redeemRequestID: UUID().uuidString
+        )
+    }
+
+    private func firstAvailableResetCreditID(accessToken: String, accountID: String?) async throws -> String {
+        var req = URLRequest(url: resetCreditListURL)
+        req.httpMethod = "GET"
+        req.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        req.setValue("application/json", forHTTPHeaderField: "Accept")
+        req.setValue("ClaudeCodexUsageBar/1.0", forHTTPHeaderField: "User-Agent")
+        if let accountID, !accountID.isEmpty {
+            req.setValue(accountID, forHTTPHeaderField: "ChatGPT-Account-Id")
+        }
+
+        let (data, response) = try await session.data(for: req)
+        DebugDump.writeCodexReset(data: prettyJSON(data) ?? data)
+        guard let http = response as? HTTPURLResponse else {
+            throw FetchError.network(NSError(domain: "ClaudeCodexUsageBar.Codex", code: -4))
+        }
+        switch http.statusCode {
+        case 200..<300:
+            break
+        case 401, 403:
+            throw FetchError.unauthorized
+        default:
+            let body = String(data: data, encoding: .utf8) ?? ""
+            throw FetchError.http(http.statusCode, body)
+        }
+
+        guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let credits = root["credits"] as? [[String: Any]],
+              let credit = credits.first(where: { ($0["status"] as? String) == "available" }),
+              let id = credit["id"] as? String,
+              !id.isEmpty
+        else {
+            throw FetchError.decodeFailed("Codex reset credit is not available.")
+        }
+        return id
+    }
+
+    private func postResetCredit(accessToken: String, accountID: String?, creditID: String, redeemRequestID: String) async throws {
+        var req = URLRequest(url: resetCreditConsumeURL)
+        req.httpMethod = "POST"
+        req.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        req.setValue("application/json", forHTTPHeaderField: "Accept")
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue("ClaudeCodexUsageBar/1.0", forHTTPHeaderField: "User-Agent")
+        req.httpBody = try JSONSerialization.data(withJSONObject: [
+            "credit_id": creditID,
+            "redeem_request_id": redeemRequestID,
+        ])
+        if let accountID, !accountID.isEmpty {
+            req.setValue(accountID, forHTTPHeaderField: "ChatGPT-Account-Id")
+        }
+
+        let (data, response) = try await session.data(for: req)
+        DebugDump.writeCodexReset(data: prettyJSON(data) ?? data)
+        guard let http = response as? HTTPURLResponse else {
+            throw FetchError.network(NSError(domain: "ClaudeCodexUsageBar.Codex", code: -3))
+        }
+        switch http.statusCode {
+        case 200..<300:
+            if let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let outcome = root["outcome"] as? String,
+               outcome != "reset" {
+                throw FetchError.decodeFailed("Codex reset was not applied: \(outcome)")
+            }
+            return
+        case 401, 403:
+            throw FetchError.unauthorized
+        default:
+            let body = String(data: data, encoding: .utf8) ?? ""
+            throw FetchError.http(http.statusCode, body)
+        }
+    }
+
     private func refreshAccessToken(refreshToken: String) async throws -> String {
         var req = URLRequest(url: tokenURL)
         req.httpMethod = "POST"
@@ -120,6 +215,7 @@ final class CodexUsageFetcher {
             plan: root["plan_type"] as? String ?? "unknown",
             fiveHour: buildTrack(label: "5h", from: rateLimit["primary_window"]),
             sevenDay: buildTrack(label: "7d", from: rateLimit["secondary_window"]),
+            rateLimitResetCreditsAvailable: resetCreditsAvailable(from: root),
             fetchedAt: Date()
         )
     }
@@ -138,6 +234,13 @@ final class CodexUsageFetcher {
         if let i = v as? Int { return Double(i) }
         if let s = v as? String, let d = Double(s) { return d }
         return nil
+    }
+
+    private func resetCreditsAvailable(from root: [String: Any]) -> Int {
+        guard let credits = root["rate_limit_reset_credits"] as? [String: Any],
+              let count = numeric(credits["available_count"])
+        else { return 0 }
+        return max(0, Int(count))
     }
 
     private func urlEncode(_ value: String) -> String {

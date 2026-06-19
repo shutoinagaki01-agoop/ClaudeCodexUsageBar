@@ -111,6 +111,7 @@ struct CodexUsageSnapshot: Equatable {
     let plan: String
     let fiveHour: CodexUsageTrack?
     let sevenDay: CodexUsageTrack?
+    let rateLimitResetCreditsAvailable: Int
     let fetchedAt: Date
 
     var tracks: [CodexUsageTrack] {

@@ -322,7 +322,16 @@ enum DebugDump {
         try? data.write(to: url)
     }
 
+    static func writeCodexReset(data: Data) {
+        let url = codexResetResponseURL
+        try? data.write(to: url)
+    }
+
     static var codexResponseURL: URL {
         directory.appendingPathComponent("codex_usage_response.json")
+    }
+
+    static var codexResetResponseURL: URL {
+        directory.appendingPathComponent("codex_reset_response.json")
     }
 }

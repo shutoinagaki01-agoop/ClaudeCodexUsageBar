@@ -13,6 +13,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var latestCodexError: String?
     private var latestClaudeOrganizations: [ClaudeOrganization] = []
     private var latestClaudeOrganizationsError: String?
+    private var isResettingCodexUsage = false
     private var nextClaudeAutoRefreshAt: Date?
     private var nextCodexAutoRefreshAt: Date?
     private var config = AppConfig.load()
@@ -116,7 +117,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
 
         addAction(to: menu, title: "Claude/Codexの残量を手動で更新", selector: #selector(refreshAction), key: "r")
-        addDataSubmenu(to: menu)
+        addCodexResetAction(to: menu)
         addSettingsSubmenu(to: menu)
 
         menu.addItem(.separator())
@@ -128,6 +129,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func addAction(to menu: NSMenu, title: String, selector: Selector, key: String) {
         let item = NSMenuItem(title: title, action: selector, keyEquivalent: key)
         item.target = self
+        menu.addItem(item)
+    }
+
+    private func addCodexResetAction(to menu: NSMenu) {
+        let count = latestCodex?.rateLimitResetCreditsAvailable ?? 0
+        let item = NSMenuItem(title: "Codex 使用量をリセット: 残り\(count)回", action: #selector(resetCodexUsageAction), keyEquivalent: "")
+        item.target = self
+        item.isEnabled = count > 0 && !isResettingCodexUsage
         menu.addItem(item)
     }
 
@@ -148,6 +157,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         addDisabledItem(to: submenu, title: "ピーク時間: \(config.peakWindowLabel)")
         addDisabledItem(to: submenu, title: "ピーク時更新間隔: \(formatInterval(config.peakRefreshInterval))")
         addDisabledItem(to: submenu, title: "通常時更新間隔: \(formatInterval(config.normalRefreshInterval))")
+        submenu.addItem(.separator())
+        addDataSubmenu(to: submenu)
         submenu.addItem(.separator())
         let sessionKey = NSMenuItem(title: "Claude sessionKey を設定…", action: #selector(setSessionKeyAction), keyEquivalent: ",")
         sessionKey.target = self
@@ -293,6 +304,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func editTimeSettingsAction() {
         promptForTimeSettings()
+    }
+
+    @objc private func resetCodexUsageAction() {
+        let count = latestCodex?.rateLimitResetCreditsAvailable ?? 0
+        guard count > 0 else { return }
+
+        let alert = NSAlert()
+        alert.messageText = "Codex 使用量をリセットしますか？"
+        alert.informativeText = "リセット可能回数を1回消費します。現在の残り回数は \(count) 回です。この操作は取り消せません。"
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "リセット")
+        alert.addButton(withTitle: "キャンセル")
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        isResettingCodexUsage = true
+        latestCodexError = "Codex 使用量をリセット中…"
+        rebuildMenu()
+
+        Task { [weak self] in
+            guard let self = self else { return }
+            do {
+                try await self.codexFetcher.consumeRateLimitResetCredit()
+                await MainActor.run {
+                    self.isResettingCodexUsage = false
+                    self.refreshCodex()
+                }
+            } catch {
+                await MainActor.run {
+                    self.isResettingCodexUsage = false
+                    self.latestCodexError = "リセット失敗: \((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)"
+                    self.updateTitle()
+                    self.rebuildMenu()
+                }
+            }
+        }
     }
 
     @objc private func reloadClaudeOrganizationsAction() {
