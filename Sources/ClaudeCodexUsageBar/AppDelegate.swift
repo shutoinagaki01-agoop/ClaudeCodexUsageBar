@@ -47,13 +47,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private func configureNotifications() {
         let center = UNUserNotificationCenter.current()
         center.delegate = self
-        center.requestAuthorization(options: [.alert, .sound]) { granted, error in
-            if let error {
-                print("Notification authorization failed: \(error.localizedDescription)")
-            } else if !granted {
-                print("Notification authorization was not granted.")
-            }
-        }
     }
 
     func userNotificationCenter(
@@ -811,9 +804,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         let key = weeklyLimitAlertKey(service: service, threshold: threshold, resetsAt: resetsAt)
         guard !UserDefaults.standard.bool(forKey: key) else { return }
 
-        for crossedThreshold in thresholds where crossedThreshold >= threshold {
-            UserDefaults.standard.set(true, forKey: weeklyLimitAlertKey(service: service, threshold: crossedThreshold, resetsAt: resetsAt))
-        }
+        let crossedThresholds = thresholds.filter { $0 >= threshold }
 
         deliverWeeklyLimitNotification(
             service: service,
@@ -821,7 +812,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             threshold: threshold,
             remainingPercent: remainingPercent,
             resetTimeString: resetTimeString
-        )
+        ) { delivered in
+            guard delivered else { return }
+            for crossedThreshold in crossedThresholds {
+                UserDefaults.standard.set(true, forKey: self.weeklyLimitAlertKey(service: service, threshold: crossedThreshold, resetsAt: resetsAt))
+            }
+        }
     }
 
     private func weeklyLimitAlertKey(service: String, threshold: Int, resetsAt: Date?) -> String {
@@ -834,7 +830,57 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         label: String,
         threshold: Int,
         remainingPercent: Int,
-        resetTimeString: String
+        resetTimeString: String,
+        completion: @escaping (Bool) -> Void
+    ) {
+        ensureNotificationAuthorization { [weak self] granted in
+            guard granted else {
+                DispatchQueue.main.async {
+                    self?.showNotificationPermissionAlert()
+                    completion(false)
+                }
+                return
+            }
+
+            self?.enqueueWeeklyLimitNotification(
+                service: service,
+                label: label,
+                threshold: threshold,
+                remainingPercent: remainingPercent,
+                resetTimeString: resetTimeString,
+                completion: completion
+            )
+        }
+    }
+
+    private func ensureNotificationAuthorization(completion: @escaping (Bool) -> Void) {
+        let center = UNUserNotificationCenter.current()
+        center.getNotificationSettings { settings in
+            switch settings.authorizationStatus {
+            case .authorized, .provisional, .ephemeral:
+                completion(true)
+            case .notDetermined:
+                center.requestAuthorization(options: [.alert, .sound]) { granted, error in
+                    if let error {
+                        print("Notification authorization failed: \(error.localizedDescription)")
+                    }
+                    completion(granted)
+                }
+            case .denied:
+                completion(false)
+            @unknown default:
+                completion(false)
+            }
+        }
+    }
+
+    private func enqueueWeeklyLimitNotification(
+        service: String,
+        label: String,
+        threshold: Int,
+        remainingPercent: Int,
+        resetTimeString: String,
+        completion: @escaping (Bool) -> Void
     ) {
         let content = UNMutableNotificationContent()
         content.title = "\(service) weekly limit 残量が \(threshold)% 以下です"
@@ -850,8 +896,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         UNUserNotificationCenter.current().add(request) { error in
             if let error {
                 print("Weekly limit notification failed: \(error.localizedDescription)")
+                completion(false)
+            } else {
+                completion(true)
             }
         }
+    }
+
+    private func showNotificationPermissionAlert() {
+        let alert = NSAlert()
+        alert.messageText = "通知が許可されていません"
+        alert.informativeText = "macOSの「システム設定 > 通知」で ClaudeCodexUsageBar の通知を許可してください。"
+        alert.addButton(withTitle: "OK")
+        NSApp.activate(ignoringOtherApps: true)
+        alert.runModal()
     }
 
     private func isInAutoRefreshWindow(_ date: Date = Date()) -> Bool {
