@@ -49,6 +49,16 @@ open build/ClaudeCodexUsageBar.app
 
 設定は macOS の `UserDefaults` に保存されるため、変更後の再ビルドは不要です。
 
+### weekly limit 通知
+
+Claude / Codex の 7d 枠（weekly limit）が **50%以下**、**20%以下** になったタイミングで macOS 通知を出します。
+
+- 手動更新、自動更新のどちらでも通知判定します
+- 同じ weekly limit のリセット時刻内では、同じ閾値の通知は1回だけです
+- 例: 50%通知後、さらに20%以下になった場合は20%通知も出ます
+- macOS の通知設定で `ClaudeCodexUsageBar` の通知を許可してください
+- 画面共有・ミラーリング中に通知を表示したい場合は、macOS の **「画面をミラーリングまたは共有しているときに通知を許可」** も有効にしてください
+
 ## Claude の sessionKey の取り方
 
 1. ブラウザで <https://claude.ai> にログイン
@@ -214,6 +224,7 @@ ClaudeCodexUsageBar/
 | 「Codex auth not found」 | `codex login` を実行して `~/.codex/auth.json` を作る |
 | 「usage tracks not found」 | claude.ai 側の仕様変更の可能性。⌘J で生 JSON を確認して `UsageFetcher.swift` を更新 |
 | 「自動更新は JST 09:30-21:00 のみ」 | 仕様。手動更新したいときは ⌘R |
+| weekly limit 通知が出ない | **システム設定 > 通知 > ClaudeCodexUsageBar** がONか確認。画面共有・ミラーリング中は **「画面をミラーリングまたは共有しているときに通知を許可」** もONにする |
 
 ## ライセンス
 

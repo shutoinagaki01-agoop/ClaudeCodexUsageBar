@@ -18,7 +18,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private var nextClaudeAutoRefreshAt: Date?
     private var nextCodexAutoRefreshAt: Date?
     private var config = AppConfig.load()
-    private let weeklyLimitAlertThresholds = Array(70...100)
+    private let weeklyLimitAlertThresholds = [50, 20]
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -883,8 +883,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         completion: @escaping (Bool) -> Void
     ) {
         let content = UNMutableNotificationContent()
-        content.title = "\(service) weekly limit 残量が \(threshold)% 以下です"
-        content.body = "\(label) の残りは \(remainingPercent)% です。リセット: \(resetTimeString)"
+        content.title = "\(service) の weekly limit が残り\(remainingPercent)%になりました"
+        content.body = "リセット: \(resetTimeString)"
         content.sound = .default
 
         let request = UNNotificationRequest(
