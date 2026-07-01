@@ -27,6 +27,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         rebuildMenu()
         loadClaudeOrganizations()
+        registerWorkspaceNotifications()
 
         if KeychainHelper.load() == nil {
             promptForSessionKey(reason: "初回セットアップ: claude.ai の sessionKey を貼り付けてください")
@@ -34,6 +35,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         refreshClaude(isAutomatic: true)
         refreshCodex(isAutomatic: true)
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
+    }
+
+    private func registerWorkspaceNotifications() {
+        let center = NSWorkspace.shared.notificationCenter
+        center.addObserver(
+            self,
+            selector: #selector(workspaceWillSleep),
+            name: NSWorkspace.willSleepNotification,
+            object: nil
+        )
+        center.addObserver(
+            self,
+            selector: #selector(workspaceDidWake),
+            name: NSWorkspace.didWakeNotification,
+            object: nil
+        )
     }
 
     // MARK: - メニュー
@@ -301,6 +322,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func refreshAction() { refreshNow() }
     @objc private func quitAction() { NSApp.terminate(nil) }
+
+    @objc private func workspaceWillSleep() {
+        claudeTimer?.invalidate()
+        codexTimer?.invalidate()
+        claudeTimer = nil
+        codexTimer = nil
+        nextClaudeAutoRefreshAt = nil
+        nextCodexAutoRefreshAt = nil
+    }
+
+    @objc private func workspaceDidWake() {
+        config = AppConfig.load()
+
+        if isInAutoRefreshWindow() {
+            refreshClaude(isAutomatic: true)
+            refreshCodex(isAutomatic: true)
+        } else {
+            scheduleNextClaudeAutoRefresh()
+            scheduleNextCodexAutoRefresh()
+            rebuildMenu()
+        }
+    }
 
     @objc private func editTimeSettingsAction() {
         promptForTimeSettings()
