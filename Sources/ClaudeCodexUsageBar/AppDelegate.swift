@@ -1,6 +1,7 @@
 import Cocoa
+import UserNotifications
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
 
     private var statusItem: NSStatusItem!
     private var claudeTimer: Timer?
@@ -17,6 +18,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var nextClaudeAutoRefreshAt: Date?
     private var nextCodexAutoRefreshAt: Date?
     private var config = AppConfig.load()
+    private let weeklyLimitAlertThresholds = Array(70...100)
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -26,6 +28,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         rebuildMenu()
+        configureNotifications()
         loadClaudeOrganizations()
         registerWorkspaceNotifications()
 
@@ -39,6 +42,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         NSWorkspace.shared.notificationCenter.removeObserver(self)
+    }
+
+    private func configureNotifications() {
+        let center = UNUserNotificationCenter.current()
+        center.delegate = self
+        center.requestAuthorization(options: [.alert, .sound]) { granted, error in
+            if let error {
+                print("Notification authorization failed: \(error.localizedDescription)")
+            } else if !granted {
+                print("Notification authorization was not granted.")
+            }
+        }
+    }
+
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification,
+        withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+    ) {
+        completionHandler([.banner, .sound])
     }
 
     private func registerWorkspaceNotifications() {
@@ -601,6 +624,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 await MainActor.run {
                     self.latest = snap
                     self.latestError = nil
+                    self.showWeeklyLimitAlertIfNeeded(service: "Claude", track: self.weeklyLimitTrack(from: snap))
                     self.updateTitle()
                     self.scheduleNextClaudeAutoRefresh()
                     self.rebuildMenu()
@@ -636,6 +660,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 await MainActor.run {
                     self.latestCodex = snap
                     self.latestCodexError = nil
+                    self.showWeeklyLimitAlertIfNeeded(service: "Codex", track: self.weeklyLimitTrack(from: snap))
                     self.updateTitle()
                     self.scheduleNextCodexAutoRefresh()
                     self.rebuildMenu()
@@ -737,6 +762,96 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let resetsAt = track.resetsAt, resetsAt.timeIntervalSince(date) > minimumDelay else { return nil }
             return resetsAt
         }.min()
+    }
+
+    private func weeklyLimitTrack(from snapshot: UsageSnapshot) -> UsageTrack? {
+        snapshot.tracks
+            .filter { $0.label.hasPrefix("7d") }
+            .min { $0.remainingFraction < $1.remainingFraction }
+    }
+
+    private func weeklyLimitTrack(from snapshot: CodexUsageSnapshot) -> CodexUsageTrack? {
+        snapshot.tracks
+            .filter { $0.label.hasPrefix("7d") }
+            .min { $0.remainingFraction < $1.remainingFraction }
+    }
+
+    private func showWeeklyLimitAlertIfNeeded(service: String, track: UsageTrack?) {
+        guard let track else { return }
+        showWeeklyLimitAlertIfNeeded(
+            service: service,
+            label: track.label,
+            remainingPercent: track.remainingPercent,
+            resetTimeString: track.resetTimeString,
+            resetsAt: track.resetsAt
+        )
+    }
+
+    private func showWeeklyLimitAlertIfNeeded(service: String, track: CodexUsageTrack?) {
+        guard let track else { return }
+        showWeeklyLimitAlertIfNeeded(
+            service: service,
+            label: track.label,
+            remainingPercent: track.remainingPercent,
+            resetTimeString: track.resetTimeString,
+            resetsAt: track.resetsAt
+        )
+    }
+
+    private func showWeeklyLimitAlertIfNeeded(
+        service: String,
+        label: String,
+        remainingPercent: Int,
+        resetTimeString: String,
+        resetsAt: Date?
+    ) {
+        let thresholds = weeklyLimitAlertThresholds.sorted()
+        guard let threshold = thresholds.first(where: { remainingPercent <= $0 }) else { return }
+
+        let key = weeklyLimitAlertKey(service: service, threshold: threshold, resetsAt: resetsAt)
+        guard !UserDefaults.standard.bool(forKey: key) else { return }
+
+        for crossedThreshold in thresholds where crossedThreshold >= threshold {
+            UserDefaults.standard.set(true, forKey: weeklyLimitAlertKey(service: service, threshold: crossedThreshold, resetsAt: resetsAt))
+        }
+
+        deliverWeeklyLimitNotification(
+            service: service,
+            label: label,
+            threshold: threshold,
+            remainingPercent: remainingPercent,
+            resetTimeString: resetTimeString
+        )
+    }
+
+    private func weeklyLimitAlertKey(service: String, threshold: Int, resetsAt: Date?) -> String {
+        let resetID = resetsAt.map { String(Int($0.timeIntervalSince1970)) } ?? "unknown"
+        return "weeklyLimitAlert.\(service).\(threshold).\(resetID)"
+    }
+
+    private func deliverWeeklyLimitNotification(
+        service: String,
+        label: String,
+        threshold: Int,
+        remainingPercent: Int,
+        resetTimeString: String
+    ) {
+        let content = UNMutableNotificationContent()
+        content.title = "\(service) weekly limit 残量が \(threshold)% 以下です"
+        content.body = "\(label) の残りは \(remainingPercent)% です。リセット: \(resetTimeString)"
+        content.sound = .default
+
+        let request = UNNotificationRequest(
+            identifier: "weeklyLimit.\(service).\(threshold).\(Date().timeIntervalSince1970)",
+            content: content,
+            trigger: nil
+        )
+
+        UNUserNotificationCenter.current().add(request) { error in
+            if let error {
+                print("Weekly limit notification failed: \(error.localizedDescription)")
+            }
+        }
     }
 
     private func isInAutoRefreshWindow(_ date: Date = Date()) -> Bool {
