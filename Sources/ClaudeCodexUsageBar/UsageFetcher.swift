@@ -134,8 +134,35 @@ final class UsageFetcher {
                 tracks.append(t)
             }
         }
+        tracks.append(contentsOf: extractLimitTracks(from: root))
 
         return tracks
+    }
+
+    private func extractLimitTracks(from root: [String: Any]) -> [UsageTrack] {
+        guard let limits = root["limits"] as? [[String: Any]] else { return [] }
+
+        return limits.compactMap { limit in
+            guard (limit["group"] as? String) == "weekly" else { return nil }
+            guard let percent = numeric(limit["percent"]), percent >= 0 else { return nil }
+            guard let label = scopedWeeklyLimitLabel(from: limit) else { return nil }
+
+            let remaining = 1.0 - max(0, min(1, percent / 100.0))
+            let resetDate = resetDate(from: limit)
+
+            return UsageTrack(label: label, remainingFraction: remaining, resetsAt: resetDate)
+        }
+    }
+
+    private func scopedWeeklyLimitLabel(from limit: [String: Any]) -> String? {
+        guard let scope = limit["scope"] as? [String: Any],
+              let model = scope["model"] as? [String: Any],
+              let displayName = model["display_name"] as? String,
+              !displayName.isEmpty
+        else {
+            return nil
+        }
+        return "7d \(displayName)"
     }
 
     private func buildTrack(label: String, from obj: [String: Any]) -> UsageTrack? {
@@ -170,16 +197,7 @@ final class UsageFetcher {
         guard let frac = remaining else { return nil }
 
         // リセット時刻
-        var resetDate: Date?
-        for key in ["resets_at", "reset_at", "resetsAt", "reset_time", "next_reset"] {
-            if let s = obj[key] as? String, let d = parseISODate(s) { resetDate = d; break }
-            if let n = numeric(obj[key]) {
-                resetDate = n > 10_000_000_000
-                    ? Date(timeIntervalSince1970: n / 1000)
-                    : Date(timeIntervalSince1970: n)
-                break
-            }
-        }
+        let resetDate = resetDate(from: obj)
 
         // is_enabled が明示的に false の枠は無効扱い（例: extra_usage がオフ状態）。
         // 注意: utilization=0 / resets_at=null でも「まだ使われていない正規の枠」なので消さない。
@@ -187,6 +205,18 @@ final class UsageFetcher {
         if let enabled = obj["is_enabled"] as? Bool, enabled == false { return nil }
 
         return UsageTrack(label: label, remainingFraction: frac, resetsAt: resetDate)
+    }
+
+    private func resetDate(from obj: [String: Any]) -> Date? {
+        for key in ["resets_at", "reset_at", "resetsAt", "reset_time", "next_reset"] {
+            if let s = obj[key] as? String, let d = parseISODate(s) { return d }
+            if let n = numeric(obj[key]) {
+                return n > 10_000_000_000
+                    ? Date(timeIntervalSince1970: n / 1000)
+                    : Date(timeIntervalSince1970: n)
+            }
+        }
+        return nil
     }
 
     private func numeric(_ v: Any?) -> Double? {

@@ -265,7 +265,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     }
 
     private func sortedClaudeTracks(_ tracks: [UsageTrack]) -> [UsageTrack] {
-        let priority: [String] = ["5h", "5h Sonnet", "7d", "7d Sonnet", "7d Opus", "7d Haiku", "Extra"]
+        let priority: [String] = ["5h", "5h Sonnet", "7d", "7d Sonnet", "7d Opus", "7d Haiku", "7d Fable", "Extra"]
         return tracks.sorted { a, b in
             let ai = priority.firstIndex(of: a.label) ?? Int.max
             let bi = priority.firstIndex(of: b.label) ?? Int.max
@@ -617,7 +617,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 await MainActor.run {
                     self.latest = snap
                     self.latestError = nil
-                    self.showWeeklyLimitAlertIfNeeded(service: "Claude", track: self.weeklyLimitTrack(from: snap))
+                    self.showClaudeWeeklyLimitAlertsIfNeeded(from: snap)
                     self.updateTitle()
                     self.scheduleNextClaudeAutoRefresh()
                     self.rebuildMenu()
@@ -757,16 +757,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         }.min()
     }
 
-    private func weeklyLimitTrack(from snapshot: UsageSnapshot) -> UsageTrack? {
+    private func claudeWeeklyLimitTracks(from snapshot: UsageSnapshot) -> [UsageTrack] {
         snapshot.tracks
-            .filter { $0.label.hasPrefix("7d") }
-            .min { $0.remainingFraction < $1.remainingFraction }
+            .filter { ["7d", "7d Fable"].contains($0.label) }
     }
 
     private func weeklyLimitTrack(from snapshot: CodexUsageSnapshot) -> CodexUsageTrack? {
         snapshot.tracks
             .filter { $0.label.hasPrefix("7d") }
             .min { $0.remainingFraction < $1.remainingFraction }
+    }
+
+    private func showClaudeWeeklyLimitAlertsIfNeeded(from snapshot: UsageSnapshot) {
+        for track in claudeWeeklyLimitTracks(from: snapshot) {
+            showWeeklyLimitAlertIfNeeded(service: "Claude", track: track)
+        }
     }
 
     private func showWeeklyLimitAlertIfNeeded(service: String, track: UsageTrack?) {
@@ -801,7 +806,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         let thresholds = weeklyLimitAlertThresholds.sorted()
         guard let threshold = thresholds.first(where: { remainingPercent <= $0 }) else { return }
 
-        let key = weeklyLimitAlertKey(service: service, threshold: threshold, resetsAt: resetsAt)
+        let key = weeklyLimitAlertKey(service: service, label: label, threshold: threshold, resetsAt: resetsAt)
         guard !UserDefaults.standard.bool(forKey: key) else { return }
 
         let crossedThresholds = thresholds.filter { $0 >= threshold }
@@ -815,14 +820,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         ) { delivered in
             guard delivered else { return }
             for crossedThreshold in crossedThresholds {
-                UserDefaults.standard.set(true, forKey: self.weeklyLimitAlertKey(service: service, threshold: crossedThreshold, resetsAt: resetsAt))
+                UserDefaults.standard.set(true, forKey: self.weeklyLimitAlertKey(service: service, label: label, threshold: crossedThreshold, resetsAt: resetsAt))
             }
         }
     }
 
-    private func weeklyLimitAlertKey(service: String, threshold: Int, resetsAt: Date?) -> String {
+    private func weeklyLimitAlertKey(service: String, label: String, threshold: Int, resetsAt: Date?) -> String {
+        let labelID = label.replacingOccurrences(of: " ", with: "_")
         let resetID = resetsAt.map { String(Int($0.timeIntervalSince1970)) } ?? "unknown"
-        return "weeklyLimitAlert.\(service).\(threshold).\(resetID)"
+        return "weeklyLimitAlert.\(service).\(labelID).\(threshold).\(resetID)"
     }
 
     private func deliverWeeklyLimitNotification(
@@ -883,7 +889,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         completion: @escaping (Bool) -> Void
     ) {
         let content = UNMutableNotificationContent()
-        content.title = "\(service) の weekly limit が残り\(remainingPercent)%になりました"
+        let serviceLabel = service == "Claude" && label == "7d Fable" ? "Claude(Fable)" : service
+        content.title = "\(serviceLabel) 週次枠 残り\(remainingPercent)%"
         content.body = "リセット: \(resetTimeString)"
         content.sound = .default
 

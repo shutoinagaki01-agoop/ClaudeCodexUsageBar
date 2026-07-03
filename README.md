@@ -54,6 +54,7 @@ open build/ClaudeCodexUsageBar.app
 Claude / Codex の 7d 枠（weekly limit）が **50%以下**、**20%以下** になったタイミングで macOS 通知を出します。
 
 - 手動更新、自動更新のどちらでも通知判定します
+- Claude は `7d` と `7d Fable` を個別に通知判定します
 - 同じ weekly limit のリセット時刻内では、同じ閾値の通知は1回だけです
 - 例: 50%通知後、さらに20%以下になった場合は20%通知も出ます
 - macOS の通知設定で `ClaudeCodexUsageBar` の通知を許可してください
@@ -176,6 +177,14 @@ ClaudeCodexUsageBar/
   "seven_day":          { "utilization": 8.0,  "resets_at": "2026-05-28T23:00:00.379519+00:00" },
   "seven_day_sonnet":   null,
   "seven_day_omelette": { "utilization": 0.0,  "resets_at": null },   // 無視される（Statsigコードネーム）
+  "limits": [
+    {
+      "group": "weekly",
+      "percent": 3,
+      "resets_at": "2026-05-28T23:00:00.379519+00:00",
+      "scope": { "model": { "display_name": "Fable" } }
+    }
+  ],
   "extra_usage":        { "is_enabled": false }                       // 無視される
 }
 ```
@@ -183,6 +192,7 @@ ClaudeCodexUsageBar/
 ポイント:
 - `utilization` は **0〜100 のパーセント値**として返ってくる（1.0 を超える値は自動的に `/100` する）
 - `resets_at` はマイクロ秒精度 ISO8601 (`.379497+00:00`) → アプリ側でミリ秒に丸めて解釈
+- `limits` 配列の `group: "weekly"` は weekly limit として採用。`scope.model.display_name` があれば `7d Fable` のように表示
 - 許可リスト（`five_hour`, `seven_day`, `seven_day_sonnet/opus/haiku`, `extra_usage` 等）のキーだけ採用。`omelette`, `tangelo`, `iguana_necktie` 等の Statsig コードネームは無視
 
 ### Codex
