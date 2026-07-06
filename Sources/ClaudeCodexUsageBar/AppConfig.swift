@@ -16,6 +16,7 @@ struct AppConfig {
     let peakRefreshEndMinute: Int
     let autoRefreshTimeZone: TimeZone
     let selectedClaudeOrgUUID: String?
+    let menuBarUsesIcons: Bool
 
     static func load() -> AppConfig {
         let defaults = UserDefaults.standard
@@ -33,7 +34,8 @@ struct AppConfig {
             peakRefreshEndHour: defaults.integer(forKey: Keys.peakRefreshEndHour, default: 16),
             peakRefreshEndMinute: defaults.integer(forKey: Keys.peakRefreshEndMinute, default: 0),
             autoRefreshTimeZone: TimeZone(identifier: "Asia/Tokyo")!,
-            selectedClaudeOrgUUID: defaults.string(forKey: Keys.selectedClaudeOrgUUID)
+            selectedClaudeOrgUUID: defaults.string(forKey: Keys.selectedClaudeOrgUUID),
+            menuBarUsesIcons: defaults.bool(forKey: Keys.menuBarUsesIcons, default: true)
         )
     }
 
@@ -49,6 +51,7 @@ struct AppConfig {
         defaults.set(peakRefreshStartMinute, forKey: Keys.peakRefreshStartMinute)
         defaults.set(peakRefreshEndHour, forKey: Keys.peakRefreshEndHour)
         defaults.set(peakRefreshEndMinute, forKey: Keys.peakRefreshEndMinute)
+        defaults.set(menuBarUsesIcons, forKey: Keys.menuBarUsesIcons)
         if let selectedClaudeOrgUUID, !selectedClaudeOrgUUID.isEmpty {
             defaults.set(selectedClaudeOrgUUID, forKey: Keys.selectedClaudeOrgUUID)
         } else {
@@ -71,7 +74,28 @@ struct AppConfig {
             peakRefreshEndHour: peakRefreshEndHour,
             peakRefreshEndMinute: peakRefreshEndMinute,
             autoRefreshTimeZone: autoRefreshTimeZone,
-            selectedClaudeOrgUUID: uuid
+            selectedClaudeOrgUUID: uuid,
+            menuBarUsesIcons: menuBarUsesIcons
+        )
+    }
+
+    func withMenuBarUsesIcons(_ enabled: Bool) -> AppConfig {
+        AppConfig(
+            peakRefreshInterval: peakRefreshInterval,
+            normalRefreshInterval: normalRefreshInterval,
+            depletedFallbackRefreshInterval: depletedFallbackRefreshInterval,
+            resetRefreshBuffer: resetRefreshBuffer,
+            autoRefreshStartHour: autoRefreshStartHour,
+            autoRefreshStartMinute: autoRefreshStartMinute,
+            autoRefreshEndHour: autoRefreshEndHour,
+            autoRefreshEndMinute: autoRefreshEndMinute,
+            peakRefreshStartHour: peakRefreshStartHour,
+            peakRefreshStartMinute: peakRefreshStartMinute,
+            peakRefreshEndHour: peakRefreshEndHour,
+            peakRefreshEndMinute: peakRefreshEndMinute,
+            autoRefreshTimeZone: autoRefreshTimeZone,
+            selectedClaudeOrgUUID: selectedClaudeOrgUUID,
+            menuBarUsesIcons: enabled
         )
     }
 
@@ -103,6 +127,7 @@ struct AppConfig {
         static let peakRefreshEndHour = "settings.peakRefreshEndHour"
         static let peakRefreshEndMinute = "settings.peakRefreshEndMinute"
         static let selectedClaudeOrgUUID = "settings.selectedClaudeOrgUUID"
+        static let menuBarUsesIcons = "settings.menuBarUsesIcons"
     }
 }
 
@@ -113,5 +138,9 @@ private extension UserDefaults {
 
     func timeInterval(forKey key: String, default defaultValue: TimeInterval) -> TimeInterval {
         object(forKey: key) == nil ? defaultValue : double(forKey: key)
+    }
+
+    func bool(forKey key: String, default defaultValue: Bool) -> Bool {
+        object(forKey: key) == nil ? defaultValue : bool(forKey: key)
     }
 }

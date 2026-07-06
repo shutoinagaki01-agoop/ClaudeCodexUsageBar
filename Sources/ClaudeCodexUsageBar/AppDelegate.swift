@@ -23,7 +23,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem.button {
-            button.title = "Claude …"
+            setMenuBarTitle("\(claudeTextLabel) …")
             button.toolTip = "Claude usage"
         }
 
@@ -195,6 +195,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         addDisabledItem(to: submenu, title: "ピーク時更新間隔: \(formatInterval(config.peakRefreshInterval))")
         addDisabledItem(to: submenu, title: "通常時更新間隔: \(formatInterval(config.normalRefreshInterval))")
         submenu.addItem(.separator())
+        let iconDisplay = NSMenuItem(title: "メニューバーをアイコン表示", action: #selector(toggleMenuBarIconDisplayAction), keyEquivalent: "")
+        iconDisplay.target = self
+        iconDisplay.state = config.menuBarUsesIcons ? .on : .off
+        submenu.addItem(iconDisplay)
+        submenu.addItem(.separator())
         addDataSubmenu(to: submenu)
         submenu.addItem(.separator())
         let sessionKey = NSMenuItem(title: "Claude sessionKey を設定…", action: #selector(setSessionKeyAction), keyEquivalent: ",")
@@ -249,19 +254,61 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             let headerTrack = claudeHeaderTrack(from: tracks) ?? sorted.first!
             let codexPart = codexTitlePart()
             let resetSuffix = headerTrack.resetsAt == nil ? "" : "·\(shortReset(headerTrack))"
-            button.title = "Claude \(headerTrack.remainingPercent)%\(resetSuffix)\(codexPart)"
+            setMenuBarTitle("\(claudeTextLabel) \(headerTrack.remainingPercent)%\(resetSuffix)\(codexPart)")
             let claudeTip = sorted.map { "\($0.label): 残り \($0.remainingPercent)%, リセット \($0.resetTimeString)" }
                 .joined(separator: "\n")
                 + "\n更新: \(formatTime(latest!.fetchedAt))"
             let codexTip = codexToolTipPart()
             button.toolTip = codexTip.isEmpty ? claudeTip : "\(claudeTip)\n\n\(codexTip)"
         } else if latestError != nil {
-            button.title = "Claude !"
+            setMenuBarTitle("\(claudeTextLabel) !")
             button.toolTip = latestError
         } else {
-            button.title = "Claude …"
+            setMenuBarTitle("\(claudeTextLabel) …")
             button.toolTip = "取得中"
         }
+    }
+
+    private func setMenuBarTitle(_ title: String) {
+        guard let button = statusItem.button else { return }
+        button.image = nil
+
+        guard config.menuBarUsesIcons else {
+            button.attributedTitle = NSAttributedString()
+            button.title = title
+            return
+        }
+
+        button.title = ""
+        button.attributedTitle = iconMenuBarTitle(from: title)
+    }
+
+    private func iconMenuBarTitle(from title: String) -> NSAttributedString {
+        let output = NSMutableAttributedString()
+        var remaining = title
+
+        if remaining.hasPrefix(claudeTextLabel) {
+            output.append(iconAttachmentString(image: makeClaudeMenuBarIcon()))
+            remaining.removeFirst(claudeTextLabel.count)
+        }
+
+        while let range = remaining.range(of: codexTextLabel) {
+            output.append(NSAttributedString(string: String(remaining[..<range.lowerBound])))
+            output.append(iconAttachmentString(image: makeCodexMenuBarIcon()))
+            remaining = String(remaining[range.upperBound...])
+        }
+
+        output.append(NSAttributedString(string: remaining))
+        return output
+    }
+
+    private func iconAttachmentString(image: NSImage) -> NSAttributedString {
+        let attachment = NSTextAttachment()
+        attachment.image = image
+        attachment.bounds = NSRect(x: 0, y: -3, width: 16, height: 16)
+        let string = NSMutableAttributedString(attachment: attachment)
+        string.append(NSAttributedString(string: " "))
+        return string
     }
 
     private func sortedClaudeTracks(_ tracks: [UsageTrack]) -> [UsageTrack] {
@@ -281,7 +328,101 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
     private func codexTitlePart() -> String {
         guard let fiveHour = latestCodex?.fiveHour else { return "" }
-        return " | Codex \(fiveHour.remainingPercent)%·\(shortReset(fiveHour))"
+        return " | \(codexTextLabel) \(fiveHour.remainingPercent)%·\(shortReset(fiveHour))"
+    }
+
+    private var claudeTextLabel: String {
+        "Claude"
+    }
+
+    private var codexTextLabel: String {
+        "Codex"
+    }
+
+    private func makeClaudeMenuBarIcon() -> NSImage {
+        makeVectorIcon(resourceName: "ClaudeIcon")
+    }
+
+    private func makeCodexMenuBarIcon() -> NSImage {
+        loadTemplateIcon(resourceName: "CodexIcon", tint: .white) ?? NSImage(size: NSSize(width: 16, height: 16))
+    }
+
+    private func makeVectorIcon(resourceName: String) -> NSImage {
+        guard let icon = loadSVGIcon(resourceName: resourceName) else {
+            return NSImage(size: NSSize(width: 16, height: 16))
+        }
+        return makeVectorIcon(pathData: icon.pathData, viewBox: icon.viewBox)
+    }
+
+    private func makeVectorIcon(pathData: String, viewBox: NSRect) -> NSImage {
+        let iconSize: CGFloat = 16
+        let image = NSImage(size: NSSize(width: iconSize, height: iconSize))
+        image.lockFocus()
+
+        guard let context = NSGraphicsContext.current?.cgContext else {
+            image.unlockFocus()
+            return image
+        }
+
+        var parser = SVGPathParser(pathData)
+        let path = parser.parse()
+        let scale = min(iconSize / viewBox.width, iconSize / viewBox.height)
+        let width = viewBox.width * scale
+        let height = viewBox.height * scale
+        let x = (iconSize - width) / 2
+        let y = (iconSize - height) / 2
+
+        context.saveGState()
+        context.translateBy(x: x, y: y + height)
+        context.scaleBy(x: scale, y: -scale)
+        NSColor.labelColor.setFill()
+        path.fill()
+        context.restoreGState()
+
+        image.unlockFocus()
+        return image
+    }
+
+    private func loadSVGIcon(resourceName: String) -> SVGIcon? {
+        guard let url = iconResourceURL(resourceName: resourceName),
+              let data = try? String(contentsOf: url, encoding: .utf8)
+        else {
+            return nil
+        }
+        return SVGIcon(svg: data)
+    }
+
+    private func iconResourceURL(resourceName: String) -> URL? {
+        if let bundled = Bundle.main.url(forResource: resourceName, withExtension: "svg") {
+            return bundled
+        }
+
+        let local = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("Resources")
+            .appendingPathComponent("\(resourceName).svg")
+        return FileManager.default.fileExists(atPath: local.path) ? local : nil
+    }
+
+    private func loadTemplateIcon(resourceName: String, tint: NSColor) -> NSImage? {
+        guard let url = imageResourceURL(resourceName: resourceName),
+              let image = NSImage(contentsOf: url)
+        else {
+            return nil
+        }
+
+        image.size = NSSize(width: 16, height: 16)
+        return image.tinted(with: tint)
+    }
+
+    private func imageResourceURL(resourceName: String) -> URL? {
+        if let bundled = Bundle.main.url(forResource: resourceName, withExtension: "png") {
+            return bundled
+        }
+
+        let local = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("Resources")
+            .appendingPathComponent("\(resourceName).png")
+        return FileManager.default.fileExists(atPath: local.path) ? local : nil
     }
 
     private func codexToolTipPart() -> String {
@@ -363,6 +504,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
     @objc private func editTimeSettingsAction() {
         promptForTimeSettings()
+    }
+
+    @objc private func toggleMenuBarIconDisplayAction() {
+        config = config.withMenuBarUsesIcons(!config.menuBarUsesIcons)
+        config.save()
+        updateTitle()
+        rebuildMenu()
     }
 
     @objc private func resetCodexUsageAction() {
@@ -520,7 +668,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 peakRefreshEndHour: peakEndTime.hour,
                 peakRefreshEndMinute: peakEndTime.minute,
                 autoRefreshTimeZone: config.autoRefreshTimeZone,
-                selectedClaudeOrgUUID: config.selectedClaudeOrgUUID
+                selectedClaudeOrgUUID: config.selectedClaudeOrgUUID,
+                menuBarUsesIcons: config.menuBarUsesIcons
             )
             config.save()
             scheduleNextClaudeAutoRefresh()
@@ -967,6 +1116,168 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private func selectedClaudeOrganization() -> ClaudeOrganization? {
         guard let uuid = selectedClaudeOrgUUID() else { return nil }
         return latestClaudeOrganizations.first(where: { $0.uuid == uuid })
+    }
+}
+
+private struct SVGIcon {
+    let viewBox: NSRect
+    let pathData: String
+
+    init?(svg: String) {
+        guard let viewBoxValue = Self.attribute("viewBox", in: svg),
+              let pathData = Self.attribute("d", in: svg)
+        else {
+            return nil
+        }
+
+        let values = viewBoxValue.split(separator: " ").compactMap { Double($0) }
+        guard values.count == 4 else { return nil }
+
+        self.viewBox = NSRect(x: values[0], y: values[1], width: values[2], height: values[3])
+        self.pathData = pathData
+    }
+
+    private static func attribute(_ name: String, in string: String) -> String? {
+        let pattern = #"\#(name)="([^"]+)""#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+        let range = NSRange(string.startIndex..<string.endIndex, in: string)
+        guard let match = regex.firstMatch(in: string, range: range),
+              let valueRange = Range(match.range(at: 1), in: string)
+        else {
+            return nil
+        }
+        return String(string[valueRange])
+    }
+}
+
+private extension NSImage {
+    func tinted(with color: NSColor) -> NSImage {
+        let output = NSImage(size: size)
+        output.lockFocus()
+
+        let rect = NSRect(origin: .zero, size: size)
+        draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1)
+        color.setFill()
+        rect.fill(using: .sourceIn)
+
+        output.unlockFocus()
+        output.isTemplate = false
+        return output
+    }
+}
+
+private struct SVGPathParser {
+    private let tokens: [String]
+    private var index = 0
+    private var current = NSPoint.zero
+    private var subpathStart = NSPoint.zero
+
+    init(_ pathData: String) {
+        let pattern = #"[A-Za-z]|[-+]?(?:\d*\.\d+|\d+\.?)(?:[eE][-+]?\d+)?"#
+        let regex = try! NSRegularExpression(pattern: pattern)
+        let range = NSRange(pathData.startIndex..<pathData.endIndex, in: pathData)
+        self.tokens = regex.matches(in: pathData, range: range).compactMap {
+            Range($0.range, in: pathData).map { String(pathData[$0]) }
+        }
+    }
+
+    mutating func parse() -> NSBezierPath {
+        let path = NSBezierPath()
+        var command: String?
+
+        while index < tokens.count {
+            if isCommand(tokens[index]) {
+                command = tokens[index]
+                index += 1
+            }
+
+            guard let activeCommand = command else { break }
+
+            switch activeCommand {
+            case "M", "m":
+                parseMove(path: path, relative: activeCommand == "m")
+                command = activeCommand == "m" ? "l" : "L"
+            case "L", "l":
+                parseLine(path: path, relative: activeCommand == "l")
+            case "H", "h":
+                parseHorizontal(path: path, relative: activeCommand == "h")
+            case "V", "v":
+                parseVertical(path: path, relative: activeCommand == "v")
+            case "C", "c":
+                parseCurve(path: path, relative: activeCommand == "c")
+            case "Z", "z":
+                path.close()
+                current = subpathStart
+                command = nil
+            default:
+                command = nil
+            }
+        }
+
+        return path
+    }
+
+    private func isCommand(_ token: String) -> Bool {
+        token.count == 1 && token.first?.isLetter == true
+    }
+
+    private mutating func parseMove(path: NSBezierPath, relative: Bool) {
+        guard let point = readPoint(relative: relative) else { return }
+        path.move(to: point)
+        current = point
+        subpathStart = point
+
+        while let point = readPoint(relative: relative) {
+            path.line(to: point)
+            current = point
+        }
+    }
+
+    private mutating func parseLine(path: NSBezierPath, relative: Bool) {
+        while let point = readPoint(relative: relative) {
+            path.line(to: point)
+            current = point
+        }
+    }
+
+    private mutating func parseHorizontal(path: NSBezierPath, relative: Bool) {
+        while let x = readNumber() {
+            let point = NSPoint(x: relative ? current.x + x : x, y: current.y)
+            path.line(to: point)
+            current = point
+        }
+    }
+
+    private mutating func parseVertical(path: NSBezierPath, relative: Bool) {
+        while let y = readNumber() {
+            let point = NSPoint(x: current.x, y: relative ? current.y + y : y)
+            path.line(to: point)
+            current = point
+        }
+    }
+
+    private mutating func parseCurve(path: NSBezierPath, relative: Bool) {
+        while let c1 = readPoint(relative: relative),
+              let c2 = readPoint(relative: relative),
+              let end = readPoint(relative: relative) {
+            path.curve(to: end, controlPoint1: c1, controlPoint2: c2)
+            current = end
+        }
+    }
+
+    private mutating func readPoint(relative: Bool) -> NSPoint? {
+        guard let x = readNumber(), let y = readNumber() else { return nil }
+        if relative {
+            return NSPoint(x: current.x + x, y: current.y + y)
+        }
+        return NSPoint(x: x, y: y)
+    }
+
+    private mutating func readNumber() -> CGFloat? {
+        guard index < tokens.count, !isCommand(tokens[index]) else { return nil }
+        defer { index += 1 }
+        guard let value = Double(tokens[index]) else { return nil }
+        return CGFloat(value)
     }
 }
 

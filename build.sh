@@ -29,6 +29,9 @@ mkdir -p "$APP_DIR/Contents/Resources"
 cp "$BIN_PATH" "$APP_DIR/Contents/MacOS/$APP_NAME"
 cp Resources/Info.plist "$APP_DIR/Contents/Info.plist"
 cp Resources/AppIcon.icns "$APP_DIR/Contents/Resources/AppIcon.icns"
+cp Resources/ClaudeIcon.svg "$APP_DIR/Contents/Resources/ClaudeIcon.svg"
+cp Resources/CodexIcon.png "$APP_DIR/Contents/Resources/CodexIcon.png"
+cp Resources/CodexIcon@2x.png "$APP_DIR/Contents/Resources/CodexIcon@2x.png"
 
 # ad-hoc 署名（Gatekeeper の警告を緩和。Developer ID があるなら -s に置き換える）
 codesign --force --deep --sign - "$APP_DIR" || true
