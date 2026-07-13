@@ -254,7 +254,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             let headerTrack = claudeHeaderTrack(from: tracks) ?? sorted.first!
             let codexPart = codexTitlePart()
             let resetSuffix = headerTrack.resetsAt == nil ? "" : "·\(shortReset(headerTrack))"
-            setMenuBarTitle("\(claudeTextLabel) \(headerTrack.remainingPercent)%\(resetSuffix)\(codexPart)")
+            setMenuBarTitle("\(claudeTextLabel)\(claudeTitleLabelPart(for: headerTrack)) \(headerTrack.remainingPercent)%\(resetSuffix)\(codexPart)")
             let claudeTip = sorted.map { "\($0.label): 残り \($0.remainingPercent)%, リセット \($0.resetTimeString)" }
                 .joined(separator: "\n")
                 + "\n更新: \(formatTime(latest!.fetchedAt))"
@@ -323,12 +323,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
     private func claudeHeaderTrack(from tracks: [UsageTrack]) -> UsageTrack? {
         let sorted = sortedClaudeTracks(tracks)
-        return sorted.first(where: { $0.label.hasPrefix("5h") }) ?? sorted.first
+        return sorted.first(where: { $0.label == "5h" })
+            ?? sorted.first(where: { $0.label == "7d" })
+            ?? sorted.first
+    }
+
+    private func claudeTitleLabelPart(for track: UsageTrack) -> String {
+        track.label.hasPrefix("7d") ? " \(track.label)" : ""
     }
 
     private func codexTitlePart() -> String {
-        guard let fiveHour = latestCodex?.fiveHour else { return "" }
-        return " | \(codexTextLabel) \(fiveHour.remainingPercent)%·\(shortReset(fiveHour))"
+        guard let track = latestCodex?.fiveHour ?? latestCodex?.sevenDay else { return "" }
+        let label = track.label == "5h" ? "" : " \(track.label)"
+        return " | \(codexTextLabel)\(label) \(track.remainingPercent)%·\(shortReset(track))"
     }
 
     private var claudeTextLabel: String {

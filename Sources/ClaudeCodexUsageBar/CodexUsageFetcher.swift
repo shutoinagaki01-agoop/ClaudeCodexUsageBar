@@ -211,22 +211,42 @@ final class CodexUsageFetcher {
             throw FetchError.decodeFailed("Codex usage response is not a JSON object.")
         }
         let rateLimit = root["rate_limit"] as? [String: Any] ?? root
+        let tracks = [
+            buildTrack(from: rateLimit["primary_window"], fallbackLabel: "5h"),
+            buildTrack(from: rateLimit["secondary_window"], fallbackLabel: "7d"),
+        ].compactMap { $0 }
+
         return CodexUsageSnapshot(
             plan: root["plan_type"] as? String ?? "unknown",
-            fiveHour: buildTrack(label: "5h", from: rateLimit["primary_window"]),
-            sevenDay: buildTrack(label: "7d", from: rateLimit["secondary_window"]),
+            fiveHour: tracks.first(where: { $0.label == "5h" }),
+            sevenDay: tracks.first(where: { $0.label == "7d" }),
             rateLimitResetCreditsAvailable: resetCreditsAvailable(from: root),
             fetchedAt: Date()
         )
     }
 
-    private func buildTrack(label: String, from value: Any?) -> CodexUsageTrack? {
+    private func buildTrack(from value: Any?, fallbackLabel: String) -> CodexUsageTrack? {
         guard let obj = value as? [String: Any],
               let usedPercent = numeric(obj["used_percent"])
         else { return nil }
+        let label = windowLabel(from: obj) ?? fallbackLabel
         let remaining = max(0, min(1, 1.0 - usedPercent / 100.0))
         let resetsAt = numeric(obj["reset_at"]).map { Date(timeIntervalSince1970: $0) }
         return CodexUsageTrack(label: label, remainingFraction: remaining, resetsAt: resetsAt)
+    }
+
+    private func windowLabel(from obj: [String: Any]) -> String? {
+        let seconds = numeric(obj["limit_window_seconds"]) ?? numeric(obj["reset_after_seconds"])
+        guard let seconds else { return nil }
+
+        switch Int(seconds.rounded()) {
+        case 5 * 60 * 60:
+            return "5h"
+        case 7 * 24 * 60 * 60:
+            return "7d"
+        default:
+            return nil
+        }
     }
 
     private func numeric(_ v: Any?) -> Double? {
