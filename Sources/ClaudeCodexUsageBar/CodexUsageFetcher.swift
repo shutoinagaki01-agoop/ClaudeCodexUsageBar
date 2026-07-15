@@ -31,12 +31,14 @@ final class CodexUsageFetcher {
         do {
             let data = try await getUsage(accessToken: auth.accessToken, accountID: auth.accountID)
             DebugDump.writeCodex(data: prettyJSON(data) ?? data)
-            return try decodeUsage(data)
+            let expiresAt = try? await nextResetCreditExpiration(accessToken: auth.accessToken, accountID: auth.accountID)
+            return try decodeUsage(data, nextResetCreditExpiresAt: expiresAt)
         } catch FetchError.unauthorized {
             let refreshed = try await refreshAccessToken(refreshToken: auth.refreshToken)
             let data = try await getUsage(accessToken: refreshed, accountID: auth.accountID)
             DebugDump.writeCodex(data: prettyJSON(data) ?? data)
-            return try decodeUsage(data)
+            let expiresAt = try? await nextResetCreditExpiration(accessToken: refreshed, accountID: auth.accountID)
+            return try decodeUsage(data, nextResetCreditExpiresAt: expiresAt)
         }
     }
 
@@ -106,6 +108,23 @@ final class CodexUsageFetcher {
     }
 
     private func firstAvailableResetCreditID(accessToken: String, accountID: String?) async throws -> String {
+        let credits = try await resetCredits(accessToken: accessToken, accountID: accountID)
+        guard let credit = earliestExpiringAvailableCredit(from: credits),
+              let id = credit["id"] as? String,
+              !id.isEmpty
+        else {
+            throw FetchError.decodeFailed("Codex reset credit is not available.")
+        }
+        return id
+    }
+
+    private func nextResetCreditExpiration(accessToken: String, accountID: String?) async throws -> Date? {
+        let credits = try await resetCredits(accessToken: accessToken, accountID: accountID)
+        guard let credit = earliestExpiringAvailableCredit(from: credits) else { return nil }
+        return dateValue(credit["expires_at"])
+    }
+
+    private func resetCredits(accessToken: String, accountID: String?) async throws -> [[String: Any]] {
         var req = URLRequest(url: resetCreditListURL)
         req.httpMethod = "GET"
         req.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
@@ -131,14 +150,28 @@ final class CodexUsageFetcher {
         }
 
         guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let credits = root["credits"] as? [[String: Any]],
-              let credit = credits.first(where: { ($0["status"] as? String) == "available" }),
-              let id = credit["id"] as? String,
-              !id.isEmpty
+              let credits = root["credits"] as? [[String: Any]]
         else {
-            throw FetchError.decodeFailed("Codex reset credit is not available.")
+            throw FetchError.decodeFailed("Codex reset credits response is not valid.")
         }
-        return id
+        return credits
+    }
+
+    private func earliestExpiringAvailableCredit(from credits: [[String: Any]]) -> [String: Any]? {
+        credits
+            .filter { ($0["status"] as? String) == "available" }
+            .min { lhs, rhs in
+                switch (dateValue(lhs["expires_at"]), dateValue(rhs["expires_at"])) {
+                case let (lhsDate?, rhsDate?):
+                    return lhsDate < rhsDate
+                case (_?, nil):
+                    return true
+                case (nil, _?):
+                    return false
+                case (nil, nil):
+                    return false
+                }
+            }
     }
 
     private func postResetCredit(accessToken: String, accountID: String?, creditID: String, redeemRequestID: String) async throws {
@@ -206,7 +239,7 @@ final class CodexUsageFetcher {
         return token
     }
 
-    private func decodeUsage(_ data: Data) throws -> CodexUsageSnapshot {
+    private func decodeUsage(_ data: Data, nextResetCreditExpiresAt: Date?) throws -> CodexUsageSnapshot {
         guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw FetchError.decodeFailed("Codex usage response is not a JSON object.")
         }
@@ -221,6 +254,7 @@ final class CodexUsageFetcher {
             fiveHour: tracks.first(where: { $0.label == "5h" }),
             sevenDay: tracks.first(where: { $0.label == "7d" }),
             rateLimitResetCreditsAvailable: resetCreditsAvailable(from: root),
+            nextResetCreditExpiresAt: nextResetCreditExpiresAt,
             fetchedAt: Date()
         )
     }
@@ -256,6 +290,19 @@ final class CodexUsageFetcher {
         return nil
     }
 
+    private func dateValue(_ v: Any?) -> Date? {
+        if let n = numeric(v) {
+            return n > 10_000_000_000
+                ? Date(timeIntervalSince1970: n / 1000)
+                : Date(timeIntervalSince1970: n)
+        }
+        guard let s = v as? String else { return nil }
+        if let d = ISO8601DateFormatter.withFractionalSeconds.date(from: s) {
+            return d
+        }
+        return ISO8601DateFormatter.plain.date(from: s)
+    }
+
     private func resetCreditsAvailable(from root: [String: Any]) -> Int {
         guard let credits = root["rate_limit_reset_credits"] as? [String: Any],
               let count = numeric(credits["available_count"])
@@ -275,6 +322,20 @@ final class CodexUsageFetcher {
         else { return nil }
         return try? JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys])
     }
+}
+
+private extension ISO8601DateFormatter {
+    static let withFractionalSeconds: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+
+    static let plain: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter
+    }()
 }
 
 private struct CodexAuth {

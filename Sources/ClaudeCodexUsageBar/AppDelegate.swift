@@ -171,7 +171,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
     private func addCodexResetAction(to menu: NSMenu) {
         let count = latestCodex?.rateLimitResetCreditsAvailable ?? 0
-        let item = NSMenuItem(title: "Codex 使用量をリセット: 残り\(count)回", action: #selector(resetCodexUsageAction), keyEquivalent: "")
+        var title = "Codex リセット: 残り\(count)回"
+        if count > 0, let expiresAt = latestCodex?.nextResetCreditExpiresAt {
+            title += " · 期限 \(formatMonthDayTime(expiresAt))"
+        }
+        let item = NSMenuItem(title: title, action: #selector(resetCodexUsageAction), keyEquivalent: "")
         item.target = self
         item.isEnabled = count > 0 && !isResettingCodexUsage
         menu.addItem(item)
@@ -472,6 +476,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
     private func formatTime(_ d: Date) -> String {
         let f = DateFormatter(); f.dateFormat = "HH:mm:ss"; return f.string(from: d)
+    }
+
+    private func formatMonthDayTime(_ d: Date) -> String {
+        let f = DateFormatter(); f.dateFormat = "M/d HH:mm"; return f.string(from: d)
     }
 
     private func formatInterval(_ interval: TimeInterval) -> String {

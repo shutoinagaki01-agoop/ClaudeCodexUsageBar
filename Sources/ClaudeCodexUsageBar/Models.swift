@@ -112,6 +112,7 @@ struct CodexUsageSnapshot: Equatable {
     let fiveHour: CodexUsageTrack?
     let sevenDay: CodexUsageTrack?
     let rateLimitResetCreditsAvailable: Int
+    let nextResetCreditExpiresAt: Date?
     let fetchedAt: Date
 
     var tracks: [CodexUsageTrack] {
