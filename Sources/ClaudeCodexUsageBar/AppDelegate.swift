@@ -84,20 +84,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             plan.isEnabled = false
             menu.addItem(plan)
 
-            let headerTrack = claudeHeaderTrack(from: snap.tracks)
-            if let headerTrack {
-                let header = NSMenuItem(title: "  \(headerTrack.label): 残り \(headerTrack.remainingPercent)% · \(headerTrack.resetTimeString)", action: nil, keyEquivalent: "")
-                header.isEnabled = false
-                menu.addItem(header)
-            }
-
-            for t in sortedClaudeTracks(snap.tracks) where t != headerTrack {
-                let item = NSMenuItem(
-                    title: "  \(t.label): 残り \(t.remainingPercent)% · \(t.resetTimeString)",
-                    action: nil, keyEquivalent: ""
-                )
-                item.isEnabled = false
-                menu.addItem(item)
+            let selectedTrack = claudeHeaderTrack(from: snap.tracks)
+            for t in sortedClaudeTracks(snap.tracks) {
+                addClaudeTrackItem(to: menu, track: t, selectedTrack: selectedTrack)
             }
             let updated = NSMenuItem(title: "Claude 更新: \(formatTime(snap.fetchedAt))", action: nil, keyEquivalent: "")
             updated.isEnabled = false
@@ -122,14 +111,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             let plan = NSMenuItem(title: "Codex: \(codex.plan)", action: nil, keyEquivalent: "")
             plan.isEnabled = false
             menu.addItem(plan)
+            let selectedTrack = codexTitleTrack(from: codex)
             for t in codex.tracks {
-                let item = NSMenuItem(
-                    title: "  \(t.label): 残り \(t.remainingPercent)% · \(t.resetTimeString)",
-                    action: nil,
-                    keyEquivalent: ""
-                )
-                item.isEnabled = false
-                menu.addItem(item)
+                addCodexTrackItem(to: menu, track: t, selectedTrack: selectedTrack)
             }
             let updated = NSMenuItem(title: "Codex 更新: \(formatTime(codex.fetchedAt))", action: nil, keyEquivalent: "")
             updated.isEnabled = false
@@ -166,6 +150,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private func addAction(to menu: NSMenu, title: String, selector: Selector, key: String) {
         let item = NSMenuItem(title: title, action: selector, keyEquivalent: key)
         item.target = self
+        menu.addItem(item)
+    }
+
+    private func addClaudeTrackItem(to menu: NSMenu, track: UsageTrack, selectedTrack: UsageTrack?) {
+        let item = NSMenuItem(
+            title: "  \(track.label): 残り \(track.remainingPercent)% · \(track.resetTimeString)",
+            action: #selector(selectClaudeMenuBarTrackAction(_:)),
+            keyEquivalent: ""
+        )
+        item.target = self
+        item.representedObject = track.label
+        item.state = track.label == selectedTrack?.label ? .on : .off
+        menu.addItem(item)
+    }
+
+    private func addCodexTrackItem(to menu: NSMenu, track: CodexUsageTrack, selectedTrack: CodexUsageTrack?) {
+        let item = NSMenuItem(
+            title: "  \(track.label): 残り \(track.remainingPercent)% · \(track.resetTimeString)",
+            action: #selector(selectCodexMenuBarTrackAction(_:)),
+            keyEquivalent: ""
+        )
+        item.target = self
+        item.representedObject = track.label
+        item.state = track.label == selectedTrack?.label ? .on : .off
         menu.addItem(item)
     }
 
@@ -327,6 +335,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
     private func claudeHeaderTrack(from tracks: [UsageTrack]) -> UsageTrack? {
         let sorted = sortedClaudeTracks(tracks)
+        if let selected = config.selectedClaudeMenuBarTrackLabel,
+           let track = sorted.first(where: { $0.label == selected }) {
+            return track
+        }
         return sorted.first(where: { $0.label == "5h" })
             ?? sorted.first(where: { $0.label == "7d" })
             ?? sorted.first
@@ -337,9 +349,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     }
 
     private func codexTitlePart() -> String {
-        guard let track = latestCodex?.fiveHour ?? latestCodex?.sevenDay else { return "" }
+        guard let codex = latestCodex, let track = codexTitleTrack(from: codex) else { return "" }
         let label = track.label == "5h" ? "" : " \(track.label)"
         return " | \(codexTextLabel)\(label) \(track.remainingPercent)%·\(shortReset(track))"
+    }
+
+    private func codexTitleTrack(from snapshot: CodexUsageSnapshot) -> CodexUsageTrack? {
+        if let selected = config.selectedCodexMenuBarTrackLabel,
+           let track = snapshot.tracks.first(where: { $0.label == selected }) {
+            return track
+        }
+        return snapshot.fiveHour ?? snapshot.sevenDay
     }
 
     private var claudeTextLabel: String {
@@ -494,6 +514,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
     @objc private func refreshAction() { refreshNow() }
     @objc private func quitAction() { NSApp.terminate(nil) }
+
+    @objc private func selectClaudeMenuBarTrackAction(_ sender: NSMenuItem) {
+        guard let label = sender.representedObject as? String else { return }
+        config = config.withSelectedClaudeMenuBarTrackLabel(label)
+        config.save()
+        updateTitle()
+        rebuildMenu()
+    }
+
+    @objc private func selectCodexMenuBarTrackAction(_ sender: NSMenuItem) {
+        guard let label = sender.representedObject as? String else { return }
+        config = config.withSelectedCodexMenuBarTrackLabel(label)
+        config.save()
+        updateTitle()
+        rebuildMenu()
+    }
 
     @objc private func workspaceWillSleep() {
         claudeTimer?.invalidate()
@@ -684,7 +720,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 peakRefreshEndMinute: peakEndTime.minute,
                 autoRefreshTimeZone: config.autoRefreshTimeZone,
                 selectedClaudeOrgUUID: config.selectedClaudeOrgUUID,
-                menuBarUsesIcons: config.menuBarUsesIcons
+                menuBarUsesIcons: config.menuBarUsesIcons,
+                selectedClaudeMenuBarTrackLabel: config.selectedClaudeMenuBarTrackLabel,
+                selectedCodexMenuBarTrackLabel: config.selectedCodexMenuBarTrackLabel
             )
             config.save()
             scheduleNextClaudeAutoRefresh()
