@@ -1,9 +1,10 @@
 import Foundation
+import Security
 
-/// claude.ai から利用量を取得するクライアント。
+/// Claude Code / Claude CLI の OAuth 認証情報を使って Claude の利用量を取得するクライアント。
 ///
-/// 公式の使用量取得 API は存在しないため、ブラウザの DevTools で観測した非公開エンドポイントを
-/// 叩いている。実観測では `/api/bootstrap/{org}/statsig` のレスポンスに以下のような枠ごとオブジェクトが入る:
+/// ブラウザ Cookie の sessionKey は扱わず、OAuth usage endpoint のレスポンスから枠ごとの利用量を抽出する。
+/// 実観測では以下のような枠ごとオブジェクトが入る:
 ///
 /// ```json
 /// {
@@ -23,6 +24,11 @@ import Foundation
 final class UsageFetcher {
 
     private let session: URLSession
+    private let claudeOAuthUsageURL = URL(string: "https://api.anthropic.com/api/oauth/usage")!
+    private let claudeOAuthTokenURL = URL(string: "https://platform.claude.com/v1/oauth/token")!
+    private let claudeOAuthClientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+    private let claudeCredentialsURL = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent(".claude/.credentials.json")
 
     init() {
         let config = URLSessionConfiguration.ephemeral
@@ -33,80 +39,184 @@ final class UsageFetcher {
         self.session = URLSession(configuration: config)
     }
 
-    func fetchUsage(preferredOrgUUID: String? = nil) async throws -> UsageSnapshot {
-        guard let sessionKey = KeychainHelper.load(), !sessionKey.isEmpty else {
-            throw FetchError.missingSessionKey
+    func fetchUsage() async throws -> UsageSnapshot {
+        guard var credentials = loadClaudeOAuthCredentials() else {
+            throw FetchError.missingClaudeOAuthCredentials
         }
 
-        // Step 1: 組織 UUID を取得
-        let orgUUID = try await resolveOrgUUID(sessionKey: sessionKey, preferredOrgUUID: preferredOrgUUID)
+        do {
+            if credentials.isExpired {
+                credentials = try await refreshClaudeOAuthCredentials(credentials)
+            }
+            return try await fetchOAuthUsage(credentials: credentials)
+        } catch FetchError.unauthorized {
+            credentials = try await refreshClaudeOAuthCredentials(credentials)
+            return try await fetchOAuthUsage(credentials: credentials)
+        }
+    }
 
-        // Step 2: 利用量を取得（複数エンドポイントを順に試す）
-        // 最初に bootstrap/statsig を試す。実観測でここに使用量が含まれていた。
-        var lastError: Error?
-        for url in candidateUsageURLs(orgUUID: orgUUID) {
-            do {
-                let data = try await get(url: url, sessionKey: sessionKey)
-                DebugDump.write(data: data, url: url) // 失敗時に解析できるよう常に保存
-                guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                    throw FetchError.decodeFailed("\(url.lastPathComponent): not a JSON object")
-                }
-                let tracks = extractTracks(from: json)
-                if !tracks.isEmpty {
-                    return UsageSnapshot(plan: extractPlan(from: json), tracks: tracks, fetchedAt: Date())
-                }
-                // tracks 空ならフォールバックに進む
-                lastError = FetchError.decodeFailed(
-                    "\(url.lastPathComponent): usage tracks not found. top-level keys=\(Array(json.keys).sorted())"
-                )
-            } catch {
-                lastError = error
+    // MARK: - Claude OAuth
+
+    private func loadClaudeOAuthCredentials() -> ClaudeOAuthCredentials? {
+        if let data = try? Data(contentsOf: claudeCredentialsURL),
+           let credentials = parseClaudeOAuthCredentials(from: data) {
+            return credentials
+        }
+
+        for candidate in claudeOAuthKeychainCandidates {
+            if let data = loadGenericPasswordData(service: candidate.service, account: candidate.account),
+               let credentials = parseClaudeOAuthCredentials(from: data) {
+                return credentials
             }
         }
-        throw lastError ?? FetchError.decodeFailed("no candidate endpoint succeeded")
+
+        return nil
     }
 
-    // MARK: - Step 1
-
-    func fetchOrganizations() async throws -> [ClaudeOrganization] {
-        guard let sessionKey = KeychainHelper.load(), !sessionKey.isEmpty else {
-            throw FetchError.missingSessionKey
-        }
-        return try await fetchOrganizations(sessionKey: sessionKey)
-    }
-
-    private func resolveOrgUUID(sessionKey: String, preferredOrgUUID: String?) async throws -> String {
-        let organizations = try await fetchOrganizations(sessionKey: sessionKey)
-        if let preferredOrgUUID,
-           organizations.contains(where: { $0.uuid == preferredOrgUUID }) {
-            return preferredOrgUUID
-        }
-        guard let first = organizations.first else {
-            throw FetchError.organizationNotFound
-        }
-        return first.uuid
-    }
-
-    private func fetchOrganizations(sessionKey: String) async throws -> [ClaudeOrganization] {
-        let url = URL(string: "https://claude.ai/api/organizations")!
-        let data = try await get(url: url, sessionKey: sessionKey)
-
-        guard let arr = try JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
-            throw FetchError.organizationNotFound
-        }
-        let organizations = arr.compactMap(ClaudeOrganization.init(json:))
-        guard !organizations.isEmpty else { throw FetchError.organizationNotFound }
-        return organizations
-    }
-
-    // MARK: - Step 2: 候補 URL
-
-    private func candidateUsageURLs(orgUUID: String) -> [URL] {
+    private var claudeOAuthKeychainCandidates: [(service: String?, account: String?)] {
         [
-            "https://claude.ai/api/bootstrap/\(orgUUID)/statsig",
-            "https://claude.ai/api/organizations/\(orgUUID)/usage",
-            "https://claude.ai/api/account",
-        ].compactMap(URL.init(string:))
+            ("Claude Code-credentials", nil),
+            (nil, "Claude Code-credentials"),
+            ("Claude Code", "Claude Code-credentials"),
+            ("Claude Code-credentials", "Claude Code-credentials"),
+        ]
+    }
+
+    private func parseClaudeOAuthCredentials(from data: Data) -> ClaudeOAuthCredentials? {
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        guard let oauth = root["claudeAiOauth"] as? [String: Any] else { return nil }
+        guard let accessToken = oauth["accessToken"] as? String, !accessToken.isEmpty else { return nil }
+        let expiresAt = numeric(oauth["expiresAt"]).map { Date(timeIntervalSince1970: $0 / 1000.0) }
+        return ClaudeOAuthCredentials(
+            accessToken: accessToken,
+            refreshToken: oauth["refreshToken"] as? String,
+            expiresAt: expiresAt,
+            scopes: oauth["scopes"] as? [String] ?? [],
+            rateLimitTier: oauth["rateLimitTier"] as? String,
+            subscriptionType: oauth["subscriptionType"] as? String
+        )
+    }
+
+    private func fetchOAuthUsage(credentials: ClaudeOAuthCredentials) async throws -> UsageSnapshot {
+        let data = try await getOAuthUsage(accessToken: credentials.accessToken)
+        DebugDump.write(data: data, url: claudeOAuthUsageURL)
+        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw FetchError.decodeFailed("Claude OAuth usage: not a JSON object")
+        }
+        let tracks = extractTracks(from: json)
+        guard !tracks.isEmpty else {
+            throw FetchError.decodeFailed("Claude OAuth usage: usage tracks not found. top-level keys=\(Array(json.keys).sorted())")
+        }
+        return UsageSnapshot(
+            plan: credentials.subscriptionType ?? credentials.rateLimitTier ?? extractPlan(from: json),
+            tracks: tracks,
+            fetchedAt: Date()
+        )
+    }
+
+    private func getOAuthUsage(accessToken: String) async throws -> Data {
+        var req = URLRequest(url: claudeOAuthUsageURL)
+        req.httpMethod = "GET"
+        req.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        req.setValue("application/json", forHTTPHeaderField: "Accept")
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
+        req.setValue("claude-code/2.1.0", forHTTPHeaderField: "User-Agent")
+
+        do {
+            let (data, response) = try await session.data(for: req)
+            guard let http = response as? HTTPURLResponse else {
+                throw FetchError.network(NSError(domain: "ClaudeCodexUsageBar.ClaudeOAuth", code: -1))
+            }
+            switch http.statusCode {
+            case 200..<300:
+                return data
+            case 401, 403:
+                throw FetchError.unauthorized
+            default:
+                let body = String(data: data, encoding: .utf8) ?? ""
+                throw FetchError.http(http.statusCode, body)
+            }
+        } catch let e as FetchError {
+            throw e
+        } catch {
+            throw FetchError.network(error)
+        }
+    }
+
+    private func refreshClaudeOAuthCredentials(_ credentials: ClaudeOAuthCredentials) async throws -> ClaudeOAuthCredentials {
+        guard let refreshToken = credentials.refreshToken, !refreshToken.isEmpty else {
+            throw FetchError.unauthorized
+        }
+
+        var req = URLRequest(url: claudeOAuthTokenURL)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Accept")
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try JSONSerialization.data(withJSONObject: [
+            "grant_type": "refresh_token",
+            "refresh_token": refreshToken,
+            "client_id": claudeOAuthClientID,
+        ])
+
+        do {
+            let (data, response) = try await session.data(for: req)
+            guard let http = response as? HTTPURLResponse else {
+                throw FetchError.network(NSError(domain: "ClaudeCodexUsageBar.ClaudeOAuth", code: -2))
+            }
+            guard (200..<300).contains(http.statusCode) else {
+                if http.statusCode == 401 || http.statusCode == 403 {
+                    throw FetchError.unauthorized
+                }
+                let body = String(data: data, encoding: .utf8) ?? ""
+                throw FetchError.http(http.statusCode, body)
+            }
+            guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let accessToken = json["access_token"] as? String,
+                  !accessToken.isEmpty
+            else {
+                throw FetchError.decodeFailed("Claude OAuth refresh response did not include access_token.")
+            }
+
+            let expiresAt: Date?
+            if let expiresIn = numeric(json["expires_in"]) {
+                expiresAt = Date().addingTimeInterval(expiresIn)
+            } else {
+                expiresAt = credentials.expiresAt
+            }
+            let scopeString = json["scope"] as? String
+            return ClaudeOAuthCredentials(
+                accessToken: accessToken,
+                refreshToken: (json["refresh_token"] as? String) ?? refreshToken,
+                expiresAt: expiresAt,
+                scopes: scopeString?.split(separator: " ").map(String.init) ?? credentials.scopes,
+                rateLimitTier: credentials.rateLimitTier,
+                subscriptionType: credentials.subscriptionType
+            )
+        } catch let e as FetchError {
+            throw e
+        } catch {
+            throw FetchError.network(error)
+        }
+    }
+
+    private func loadGenericPasswordData(service: String?, account: String?) -> Data? {
+        var query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+        ]
+        if let service {
+            query[kSecAttrService as String] = service
+        }
+        if let account {
+            query[kSecAttrAccount as String] = account
+        }
+
+        var result: AnyObject?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        guard status == errSecSuccess else { return nil }
+        return result as? Data
     }
 
     // MARK: - 解析: 枠オブジェクトの発見
@@ -292,38 +402,6 @@ final class UsageFetcher {
         return f.date(from: noFrac)
     }
 
-    // MARK: - 共通 HTTP
-
-    private func get(url: URL, sessionKey: String) async throws -> Data {
-        var req = URLRequest(url: url)
-        req.httpMethod = "GET"
-        req.setValue("sessionKey=\(sessionKey)", forHTTPHeaderField: "Cookie")
-        req.setValue("application/json", forHTTPHeaderField: "Accept")
-        req.setValue(
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) ClaudeCodexUsageBar/1.0",
-            forHTTPHeaderField: "User-Agent"
-        )
-
-        do {
-            let (data, response) = try await session.data(for: req)
-            guard let http = response as? HTTPURLResponse else {
-                throw FetchError.network(NSError(domain: "ClaudeCodexUsageBar", code: -1))
-            }
-            switch http.statusCode {
-            case 200..<300:
-                return data
-            case 401, 403:
-                throw FetchError.unauthorized
-            default:
-                let body = String(data: data, encoding: .utf8) ?? ""
-                throw FetchError.http(http.statusCode, body)
-            }
-        } catch let e as FetchError {
-            throw e
-        } catch {
-            throw FetchError.network(error)
-        }
-    }
 }
 
 /// レスポンスを ~/Library/Application Support/ClaudeCodexUsageBar/ にダンプする。

@@ -1,45 +1,16 @@
 import Foundation
 
-struct ClaudeOrganization: Equatable {
-    let uuid: String
-    let name: String
-    let plan: String?
+struct ClaudeOAuthCredentials: Equatable {
+    let accessToken: String
+    let refreshToken: String?
+    let expiresAt: Date?
+    let scopes: [String]
+    let rateLimitTier: String?
+    let subscriptionType: String?
 
-    var displayName: String {
-        if let plan, !plan.isEmpty {
-            return "\(name) (\(plan))"
-        }
-        return name
-    }
-
-    init?(json: [String: Any]) {
-        guard let uuid = json["uuid"] as? String, !uuid.isEmpty else { return nil }
-        self.uuid = uuid
-        self.name = Self.firstString(in: json, keys: ["name", "display_name", "organization_name", "title"])
-            ?? "Claude org"
-        self.plan = Self.extractPlan(from: json)
-    }
-
-    private static func firstString(in json: [String: Any], keys: [String]) -> String? {
-        for key in keys {
-            if let value = json[key] as? String, !value.isEmpty {
-                return value
-            }
-        }
-        return nil
-    }
-
-    private static func extractPlan(from json: [String: Any]) -> String? {
-        if let value = firstString(in: json, keys: ["plan", "plan_type", "subscription_plan", "account_plan"]) {
-            return value
-        }
-        for key in ["subscription", "billing", "plan"] {
-            if let obj = json[key] as? [String: Any],
-               let value = firstString(in: obj, keys: ["name", "type", "plan", "plan_type"]) {
-                return value
-            }
-        }
-        return nil
+    var isExpired: Bool {
+        guard let expiresAt else { return false }
+        return Date() >= expiresAt
     }
 }
 
@@ -121,18 +92,16 @@ struct CodexUsageSnapshot: Equatable {
 }
 
 enum FetchError: LocalizedError {
-    case missingSessionKey
+    case missingClaudeOAuthCredentials
     case unauthorized
-    case organizationNotFound
     case decodeFailed(String)
     case network(Error)
     case http(Int, String)
 
     var errorDescription: String? {
         switch self {
-        case .missingSessionKey: return "sessionKey が未設定です。メニューから設定してください。"
-        case .unauthorized: return "認証エラー (401)。sessionKey の再設定が必要です。"
-        case .organizationNotFound: return "組織情報が取得できませんでした。"
+        case .missingClaudeOAuthCredentials: return "Claude auth not found. Run `claude auth login` first."
+        case .unauthorized: return "Claude auth expired. Run `claude auth login` again."
         case .decodeFailed(let m): return "レスポンス解析失敗: \(m)"
         case .network(let e): return "通信エラー: \(e.localizedDescription)"
         case .http(let code, let body):

@@ -15,6 +15,7 @@ macOS のメニューバーに **Claude.ai** と **Codex (ChatGPT 内の Codex)*
 
 - macOS 12 (Monterey) 以降
 - Xcode Command Line Tools (`xcode-select --install`) もしくは Xcode 本体
+- Claude 機能を使う場合: Claude Code / Claude CLI でログイン済み（macOS では Keychain の `Claude Code-credentials` が存在）
 - Codex 機能を使う場合: [Codex CLI](https://github.com/openai/codex) で `codex login` 済み（= `~/.codex/auth.json` が存在）
 
 ## ビルド & 起動
@@ -27,7 +28,8 @@ chmod +x build.sh
 open build/ClaudeCodexUsageBar.app
 ```
 
-初回起動時に Claude の sessionKey を求めるダイアログが出ます。Codex 側は `~/.codex/auth.json` が存在すれば自動で取得が始まります（存在しない場合は Codex 行に「Codex auth not found. Run `codex login` first.」と表示されますが、アプリ自体は Claude だけで動作します）。
+- Claude 側は Claude Code / Claude CLI の OAuth 認証情報が存在すれば自動で取得が始まります。OAuth 認証情報が見つからない場合、Claude 行にログイン案内が表示されます。
+- Codex 側は `~/.codex/auth.json` が存在すれば自動で取得が始まります（存在しない場合は Codex 行に「Codex auth not found. Run `codex login` first.」と表示されますが、アプリ自体は Claude だけで動作します）。
 
 ## 更新ポリシー
 
@@ -60,21 +62,18 @@ Claude / Codex の 7d 枠（weekly limit）が **50%以下**、**20%以下** に
 - macOS の通知設定で `ClaudeCodexUsageBar` の通知を許可してください
 - 画面共有・ミラーリング中に通知を表示したい場合は、macOS の **「画面をミラーリングまたは共有しているときに通知を許可」** も有効にしてください
 
-## Claude の sessionKey の取り方
+## Claude の認証
 
-1. ブラウザで <https://claude.ai> にログイン
-2. DevTools を開く（macOS: `⌥⌘I`）
-3. **Application** タブ → **Storage** → **Cookies** → `https://claude.ai`
-4. `sessionKey` Cookie の **Value** をコピー（`sk-ant-sid01-...` のような文字列）
-5. メニューバーアプリのダイアログに貼り付け → 「保存」
+Claude Code / Claude CLI が保存する OAuth 認証情報だけを再利用します。ブラウザ Cookie の `sessionKey` 認証は使いません。
 
-保存先は macOS Keychain (service: `com.example.ClaudeCodexUsageBar`)。
+```bash
+# Claude CLI 側でログイン
+claude auth login
+```
 
-### Claude org / プランを選択したい場合
+macOS では Claude Code の OAuth 認証情報は `~/.claude/.credentials.json` ではなく、macOS Keychain に `Claude Code-credentials` として保存されます。Keychain Access.app で `Claude Code-credentials` を検索すると確認できます。
 
-Claude で複数の org / プランに所属している場合は、メニューバーのドロップダウンから **詳細設定 > Claude orgを選択** を開き、使用量を確認したい org を選択してください。
-
-選択した org は macOS の `UserDefaults` に保存され、次回以降も同じ org の使用量を取得します。org 一覧が表示されない場合は **詳細設定 > Claude org一覧を再読み込み** を実行してください。
+`accessToken` が期限切れの場合は、可能な範囲で `refreshToken` による更新を試します。
 
 ## Codex の認証
 
@@ -118,11 +117,8 @@ Codex 更新: 14:21:08
 |---|---|
 | Claude/Codexの残量を手動で更新 | 即座に両方を再取得 (`⌘R`) |
 | Codex 使用量をリセット: 残りN回 | 確認後、Codex のリセット可能回数を1回消費して使用量をリセット。残り0回の場合は押せません |
-| 詳細設定 > Claude sessionKey を設定… | Cookie を更新 (`⌘,`) |
 | 詳細設定 > 取得データをFinderで開く > Claude | `~/Library/Application Support/ClaudeCodexUsageBar/last_response.json` を Finder で表示 (`⌘J`) |
 | 詳細設定 > 取得データをFinderで開く > Codex | `~/Library/Application Support/ClaudeCodexUsageBar/codex_usage_response.json` を表示 (`⌘K`) |
-| 詳細設定 > Claude orgを選択 | Claude の使用量取得元 org を変更 |
-| 詳細設定 > Claude org一覧を再読み込み | Claude org 一覧を再取得 |
 | 詳細設定 > 時間設定を変更… | 起動時間、ピーク時間、更新間隔を変更 |
 | claude.ai を開く | ブラウザで開く (`⌘O`) |
 | 終了 | アプリ停止 (`⌘Q`) |
@@ -136,22 +132,19 @@ ClaudeCodexUsageBar/
 ├── README.md
 ├── Resources/
 │   └── Info.plist                      # LSUIElement=true（Dock 非表示）
-├── scripts/
-│   └── discover.sh                     # Claude エンドポイント観察ツール
 └── Sources/ClaudeCodexUsageBar/
     ├── main.swift                      # 起動
     ├── AppDelegate.swift               # NSStatusItem + メニュー + タイマー
     ├── AppConfig.swift                 # 時間設定の UserDefaults 永続化
-    ├── UsageFetcher.swift              # Claude.ai 用クライアント
+    ├── UsageFetcher.swift              # Claude OAuth 用クライアント
     ├── CodexUsageFetcher.swift         # Codex (ChatGPT) 用クライアント
-    ├── KeychainHelper.swift            # sessionKey の Keychain 永続化
     └── Models.swift                    # UsageTrack / UsageSnapshot
                                         # CodexUsageTrack / CodexUsageSnapshot
 ```
 
 ## ⚠️ 重要な制約
 
-- **Claude.ai には公式の使用量取得 API がありません**。ブラウザの `sessionKey` Cookie を使って内部エンドポイント (`/api/bootstrap/{org}/statsig`) を叩いて取得しています。`sessionKey` が失効すると 401 になるため、再ログインして貼り直してください。
+- **Claude は Claude Code / Claude CLI の OAuth 認証情報だけを利用します**。OAuth では `https://api.anthropic.com/api/oauth/usage` を利用します。ブラウザ Cookie の `sessionKey` 認証は使いません。
 - **Codex の使用量取得も非公開エンドポイント** (`https://chatgpt.com/backend-api/codex/usage`) を利用しています。認証は Codex CLI が管理する `~/.codex/auth.json` の OAuth トークンを読み、401 時は `refresh_token` で自動再取得します。
 - 上記いずれも内部仕様変更で動かなくなる可能性があります。各サービスの利用規約と整合する個人利用の範囲でお使いください。
 
@@ -160,12 +153,8 @@ ClaudeCodexUsageBar/
 ### Claude
 
 1. メニューバー → **「詳細設定 > 取得データをFinderで開く > Claude」** (`⌘J`) で `last_response.json` を確認
-2. または discovery スクリプトで複数候補を一度に観察:
-   ```bash
-   ./scripts/discover.sh "$(security find-generic-password -s com.example.ClaudeCodexUsageBar -w)"
-   ```
-3. 必要に応じて `Sources/ClaudeCodexUsageBar/UsageFetcher.swift` を編集:
-   - `candidateUsageURLs(…)` に新しい URL を追加
+2. 必要に応じて `Sources/ClaudeCodexUsageBar/UsageFetcher.swift` を編集:
+   - OAuth usage URL / ヘッダー
    - `extractTracks(…)` の `knownKeys` に新しい枠キーを追加
    - `buildTrack(…)` の数値抽出ロジック（`utilization` / `remaining` / `used+total` の組み合わせ）
 
@@ -229,8 +218,8 @@ ClaudeCodexUsageBar/
 | 症状 | 対処 |
 |---|---|
 | 起動時に「Keychainログイン」のパスワードを聞かれる | macOS が ad-hoc 署名アプリの Keychain アクセスを確認している正常動作。「**常に許可**」を押す。`./build.sh` で再ビルドすると署名ハッシュが変わるためまた聞かれる |
-| 「sessionKey が未設定です」 | メニューから「詳細設定 > Claude sessionKey を設定…」を選び、claude.ai の Cookie を貼り付け |
-| 「認証エラー (401)」 | sessionKey が失効。claude.ai に再ログインして貼り直し |
+| `Claude auth not found. Run \`claude auth login\` first.` | `claude auth login` を実行する |
+| `Claude auth expired. Run \`claude auth login\` again.` | `claude auth login` を再実行する |
 | 「Codex auth not found」 | `codex login` を実行して `~/.codex/auth.json` を作る |
 | 「usage tracks not found」 | claude.ai 側の仕様変更の可能性。⌘J で生 JSON を確認して `UsageFetcher.swift` を更新 |
 | 「自動更新は JST 09:30-21:00 のみ」 | 仕様。手動更新したいときは ⌘R |

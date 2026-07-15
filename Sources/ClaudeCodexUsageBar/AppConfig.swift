@@ -15,7 +15,6 @@ struct AppConfig {
     let peakRefreshEndHour: Int
     let peakRefreshEndMinute: Int
     let autoRefreshTimeZone: TimeZone
-    let selectedClaudeOrgUUID: String?
     let menuBarUsesIcons: Bool
     let selectedClaudeMenuBarTrackLabel: String?
     let selectedCodexMenuBarTrackLabel: String?
@@ -36,7 +35,6 @@ struct AppConfig {
             peakRefreshEndHour: defaults.integer(forKey: Keys.peakRefreshEndHour, default: 16),
             peakRefreshEndMinute: defaults.integer(forKey: Keys.peakRefreshEndMinute, default: 0),
             autoRefreshTimeZone: TimeZone(identifier: "Asia/Tokyo")!,
-            selectedClaudeOrgUUID: defaults.string(forKey: Keys.selectedClaudeOrgUUID),
             menuBarUsesIcons: defaults.bool(forKey: Keys.menuBarUsesIcons, default: true),
             selectedClaudeMenuBarTrackLabel: defaults.string(forKey: Keys.selectedClaudeMenuBarTrackLabel),
             selectedCodexMenuBarTrackLabel: defaults.string(forKey: Keys.selectedCodexMenuBarTrackLabel)
@@ -58,33 +56,6 @@ struct AppConfig {
         defaults.set(menuBarUsesIcons, forKey: Keys.menuBarUsesIcons)
         saveOptional(selectedClaudeMenuBarTrackLabel, key: Keys.selectedClaudeMenuBarTrackLabel, defaults: defaults)
         saveOptional(selectedCodexMenuBarTrackLabel, key: Keys.selectedCodexMenuBarTrackLabel, defaults: defaults)
-        if let selectedClaudeOrgUUID, !selectedClaudeOrgUUID.isEmpty {
-            defaults.set(selectedClaudeOrgUUID, forKey: Keys.selectedClaudeOrgUUID)
-        } else {
-            defaults.removeObject(forKey: Keys.selectedClaudeOrgUUID)
-        }
-    }
-
-    func withSelectedClaudeOrgUUID(_ uuid: String?) -> AppConfig {
-        AppConfig(
-            peakRefreshInterval: peakRefreshInterval,
-            normalRefreshInterval: normalRefreshInterval,
-            depletedFallbackRefreshInterval: depletedFallbackRefreshInterval,
-            resetRefreshBuffer: resetRefreshBuffer,
-            autoRefreshStartHour: autoRefreshStartHour,
-            autoRefreshStartMinute: autoRefreshStartMinute,
-            autoRefreshEndHour: autoRefreshEndHour,
-            autoRefreshEndMinute: autoRefreshEndMinute,
-            peakRefreshStartHour: peakRefreshStartHour,
-            peakRefreshStartMinute: peakRefreshStartMinute,
-            peakRefreshEndHour: peakRefreshEndHour,
-            peakRefreshEndMinute: peakRefreshEndMinute,
-            autoRefreshTimeZone: autoRefreshTimeZone,
-            selectedClaudeOrgUUID: uuid,
-            menuBarUsesIcons: menuBarUsesIcons,
-            selectedClaudeMenuBarTrackLabel: selectedClaudeMenuBarTrackLabel,
-            selectedCodexMenuBarTrackLabel: selectedCodexMenuBarTrackLabel
-        )
     }
 
     func withMenuBarUsesIcons(_ enabled: Bool) -> AppConfig {
@@ -102,7 +73,6 @@ struct AppConfig {
             peakRefreshEndHour: peakRefreshEndHour,
             peakRefreshEndMinute: peakRefreshEndMinute,
             autoRefreshTimeZone: autoRefreshTimeZone,
-            selectedClaudeOrgUUID: selectedClaudeOrgUUID,
             menuBarUsesIcons: enabled,
             selectedClaudeMenuBarTrackLabel: selectedClaudeMenuBarTrackLabel,
             selectedCodexMenuBarTrackLabel: selectedCodexMenuBarTrackLabel
@@ -124,7 +94,6 @@ struct AppConfig {
             peakRefreshEndHour: peakRefreshEndHour,
             peakRefreshEndMinute: peakRefreshEndMinute,
             autoRefreshTimeZone: autoRefreshTimeZone,
-            selectedClaudeOrgUUID: selectedClaudeOrgUUID,
             menuBarUsesIcons: menuBarUsesIcons,
             selectedClaudeMenuBarTrackLabel: label,
             selectedCodexMenuBarTrackLabel: selectedCodexMenuBarTrackLabel
@@ -146,7 +115,6 @@ struct AppConfig {
             peakRefreshEndHour: peakRefreshEndHour,
             peakRefreshEndMinute: peakRefreshEndMinute,
             autoRefreshTimeZone: autoRefreshTimeZone,
-            selectedClaudeOrgUUID: selectedClaudeOrgUUID,
             menuBarUsesIcons: menuBarUsesIcons,
             selectedClaudeMenuBarTrackLabel: selectedClaudeMenuBarTrackLabel,
             selectedCodexMenuBarTrackLabel: label
@@ -180,7 +148,6 @@ struct AppConfig {
         static let peakRefreshStartMinute = "settings.peakRefreshStartMinute"
         static let peakRefreshEndHour = "settings.peakRefreshEndHour"
         static let peakRefreshEndMinute = "settings.peakRefreshEndMinute"
-        static let selectedClaudeOrgUUID = "settings.selectedClaudeOrgUUID"
         static let menuBarUsesIcons = "settings.menuBarUsesIcons"
         static let selectedClaudeMenuBarTrackLabel = "settings.selectedClaudeMenuBarTrackLabel"
         static let selectedCodexMenuBarTrackLabel = "settings.selectedCodexMenuBarTrackLabel"

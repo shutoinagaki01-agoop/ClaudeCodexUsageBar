@@ -12,8 +12,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private var latestCodex: CodexUsageSnapshot?
     private var latestError: String?
     private var latestCodexError: String?
-    private var latestClaudeOrganizations: [ClaudeOrganization] = []
-    private var latestClaudeOrganizationsError: String?
+    private var isLoadingClaude = false
+    private var isLoadingCodex = false
     private var isResettingCodexUsage = false
     private var nextClaudeAutoRefreshAt: Date?
     private var nextCodexAutoRefreshAt: Date?
@@ -29,12 +29,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
         rebuildMenu()
         configureNotifications()
-        loadClaudeOrganizations()
         registerWorkspaceNotifications()
-
-        if KeychainHelper.load() == nil {
-            promptForSessionKey(reason: "初回セットアップ: claude.ai の sessionKey を貼り付けてください")
-        }
 
         refreshClaude(isAutomatic: true)
         refreshCodex(isAutomatic: true)
@@ -133,6 +128,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 next.isEnabled = false
                 menu.addItem(next)
             }
+        } else if isLoadingCodex {
+            menu.addItem(.separator())
+            let item = NSMenuItem(title: "Codex: 取得中…", action: nil, keyEquivalent: "")
+            item.isEnabled = false
+            menu.addItem(item)
         }
 
         menu.addItem(.separator())
@@ -214,40 +214,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         submenu.addItem(.separator())
         addDataSubmenu(to: submenu)
         submenu.addItem(.separator())
-        let sessionKey = NSMenuItem(title: "Claude sessionKey を設定…", action: #selector(setSessionKeyAction), keyEquivalent: ",")
-        sessionKey.target = self
-        submenu.addItem(sessionKey)
-        submenu.addItem(.separator())
-        addClaudeOrgSubmenu(to: submenu)
-        let reloadOrgs = NSMenuItem(title: "Claude org一覧を再読み込み", action: #selector(reloadClaudeOrganizationsAction), keyEquivalent: "")
-        reloadOrgs.target = self
-        submenu.addItem(reloadOrgs)
-        submenu.addItem(.separator())
         let edit = NSMenuItem(title: "時間設定を変更…", action: #selector(editTimeSettingsAction), keyEquivalent: "")
         edit.target = self
         submenu.addItem(edit)
-
-        menu.setSubmenu(submenu, for: parent)
-        menu.addItem(parent)
-    }
-
-    private func addClaudeOrgSubmenu(to menu: NSMenu) {
-        let title = selectedClaudeOrganization().map { "Claude org: \($0.displayName)" } ?? "Claude orgを選択"
-        let parent = NSMenuItem(title: title, action: nil, keyEquivalent: "")
-        let submenu = NSMenu()
-
-        if latestClaudeOrganizations.isEmpty {
-            let message = latestClaudeOrganizationsError ?? "org一覧を取得中…"
-            addDisabledItem(to: submenu, title: message)
-        } else {
-            for org in latestClaudeOrganizations {
-                let item = NSMenuItem(title: org.displayName, action: #selector(selectClaudeOrganizationAction(_:)), keyEquivalent: "")
-                item.target = self
-                item.representedObject = org.uuid
-                item.state = org.uuid == selectedClaudeOrgUUID() ? .on : .off
-                submenu.addItem(item)
-            }
-        }
 
         menu.setSubmenu(submenu, for: parent)
         menu.addItem(parent)
@@ -264,7 +233,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         if let tracks = latest?.tracks, !tracks.isEmpty {
             let sorted = sortedClaudeTracks(tracks)
             let headerTrack = claudeHeaderTrack(from: tracks) ?? sorted.first!
-            let codexPart = codexTitlePart()
+            let codexPart = codexTitlePart(includeUnavailableState: true)
             let resetSuffix = headerTrack.resetsAt == nil ? "" : "·\(shortReset(headerTrack))"
             setMenuBarTitle("\(claudeTextLabel)\(claudeTitleLabelPart(for: headerTrack)) \(headerTrack.remainingPercent)%\(resetSuffix)\(codexPart)")
             let claudeTip = sorted.map { "\($0.label): 残り \($0.remainingPercent)%, リセット \($0.resetTimeString)" }
@@ -273,11 +242,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             let codexTip = codexToolTipPart()
             button.toolTip = codexTip.isEmpty ? claudeTip : "\(claudeTip)\n\n\(codexTip)"
         } else if latestError != nil {
-            setMenuBarTitle("\(claudeTextLabel) !")
-            button.toolTip = latestError
+            let codexPart = codexTitlePart(includeUnavailableState: true)
+            let title = codexPart.isEmpty ? "\(claudeTextLabel) error" : "\(claudeTextLabel) error\(codexPart)"
+            setMenuBarTitle(title)
+            let codexTip = codexToolTipPart()
+            button.toolTip = codexTip.isEmpty ? latestError : "\(latestError ?? "")\n\n\(codexTip)"
         } else {
-            setMenuBarTitle("\(claudeTextLabel) …")
-            button.toolTip = "取得中"
+            let codexPart = codexTitlePart(includeUnavailableState: true)
+            let title = codexPart.isEmpty ? "\(claudeTextLabel) …" : "\(claudeTextLabel) …\(codexPart)"
+            setMenuBarTitle(title)
+            let codexTip = codexToolTipPart()
+            button.toolTip = codexTip.isEmpty ? "取得中" : "取得中\n\n\(codexTip)"
         }
     }
 
@@ -348,8 +323,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         track.label.hasPrefix("7d") ? " \(track.label)" : ""
     }
 
-    private func codexTitlePart() -> String {
-        guard let codex = latestCodex, let track = codexTitleTrack(from: codex) else { return "" }
+    private func codexTitlePart(includeUnavailableState: Bool = false) -> String {
+        guard let codex = latestCodex, let track = codexTitleTrack(from: codex) else {
+            guard includeUnavailableState else { return "" }
+            if latestCodexError != nil {
+                return " | \(codexTextLabel) error"
+            }
+            if isLoadingCodex {
+                return " | \(codexTextLabel) …"
+            }
+            return ""
+        }
         let label = track.label == "5h" ? "" : " \(track.label)"
         return " | \(codexTextLabel)\(label) \(track.remainingPercent)%·\(shortReset(track))"
     }
@@ -600,20 +584,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         }
     }
 
-    @objc private func reloadClaudeOrganizationsAction() {
-        loadClaudeOrganizations()
-    }
-
-    @objc private func selectClaudeOrganizationAction(_ sender: NSMenuItem) {
-        guard let uuid = sender.representedObject as? String else { return }
-        config = config.withSelectedClaudeOrgUUID(uuid)
-        config.save()
-        latest = nil
-        latestError = "Claude 取得中…"
-        rebuildMenu()
-        refreshClaude()
-    }
-
     @objc private func revealDumpAction() {
         let url = DebugDump.lastResponseURL
         if FileManager.default.fileExists(atPath: url.path) {
@@ -630,32 +600,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             NSWorkspace.shared.activateFileViewerSelecting([url])
         } else {
             NSWorkspace.shared.open(DebugDump.directory)
-        }
-    }
-
-    @objc private func setSessionKeyAction() {
-        promptForSessionKey(reason: "ブラウザの DevTools → Application → Cookies → claude.ai → sessionKey をコピーして貼り付けてください")
-    }
-
-    private func promptForSessionKey(reason: String) {
-        let alert = NSAlert()
-        alert.messageText = "Claude sessionKey"
-        alert.informativeText = reason
-        alert.addButton(withTitle: "保存")
-        alert.addButton(withTitle: "キャンセル")
-        let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 24))
-        input.placeholderString = "sk-ant-sid01-…"
-        input.stringValue = KeychainHelper.load() ?? ""
-        alert.accessoryView = input
-        NSApp.activate(ignoringOtherApps: true)
-        let res = alert.runModal()
-        if res == .alertFirstButtonReturn {
-            let v = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !v.isEmpty {
-                KeychainHelper.save(v)
-                loadClaudeOrganizations()
-                refreshClaude()
-            }
         }
     }
 
@@ -719,7 +663,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 peakRefreshEndHour: peakEndTime.hour,
                 peakRefreshEndMinute: peakEndTime.minute,
                 autoRefreshTimeZone: config.autoRefreshTimeZone,
-                selectedClaudeOrgUUID: config.selectedClaudeOrgUUID,
                 menuBarUsesIcons: config.menuBarUsesIcons,
                 selectedClaudeMenuBarTrackLabel: config.selectedClaudeMenuBarTrackLabel,
                 selectedCodexMenuBarTrackLabel: config.selectedCodexMenuBarTrackLabel
@@ -769,56 +712,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         refreshCodex()
     }
 
-    private func loadClaudeOrganizations() {
-        guard KeychainHelper.load()?.isEmpty == false else { return }
-        latestClaudeOrganizationsError = nil
-        Task { [weak self] in
-            guard let self = self else { return }
-            do {
-                let organizations = try await self.fetcher.fetchOrganizations()
-                await MainActor.run {
-                    self.latestClaudeOrganizations = organizations
-                    self.latestClaudeOrganizationsError = nil
-                    if self.config.selectedClaudeOrgUUID == nil, let first = organizations.first {
-                        self.config = self.config.withSelectedClaudeOrgUUID(first.uuid)
-                        self.config.save()
-                    } else if let selected = self.config.selectedClaudeOrgUUID,
-                              !organizations.contains(where: { $0.uuid == selected }),
-                              let first = organizations.first {
-                        self.config = self.config.withSelectedClaudeOrgUUID(first.uuid)
-                        self.config.save()
-                    }
-                    self.rebuildMenu()
-                }
-            } catch {
-                await MainActor.run {
-                    self.latestClaudeOrganizationsError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
-                    self.rebuildMenu()
-                }
-            }
-        }
-    }
-
     private func refreshClaude(isAutomatic: Bool = false) {
         if isAutomatic && !isInAutoRefreshWindow() {
             latestError = "自動更新は JST \(config.autoRefreshWindowLabel) のみ"
+            isLoadingClaude = false
             updateTitle()
             scheduleNextClaudeAutoRefresh()
             rebuildMenu()
             return
         }
 
-        latestError = "Claude 取得中…"
+        latestError = nil
+        isLoadingClaude = true
         updateTitle()
         rebuildMenu()
 
         Task { [weak self] in
             guard let self = self else { return }
             do {
-                let snap = try await self.fetcher.fetchUsage(preferredOrgUUID: self.config.selectedClaudeOrgUUID)
+                let snap = try await self.fetcher.fetchUsage()
                 await MainActor.run {
                     self.latest = snap
                     self.latestError = nil
+                    self.isLoadingClaude = false
                     self.showClaudeWeeklyLimitAlertsIfNeeded(from: snap)
                     self.updateTitle()
                     self.scheduleNextClaudeAutoRefresh()
@@ -827,6 +743,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             } catch {
                 await MainActor.run {
                     self.latestError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                    self.isLoadingClaude = false
                     self.updateTitle()
                     self.scheduleNextClaudeAutoRefresh()
                     self.rebuildMenu()
@@ -838,13 +755,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private func refreshCodex(isAutomatic: Bool = false) {
         if isAutomatic && !isInAutoRefreshWindow() {
             latestCodexError = "自動更新は JST \(config.autoRefreshWindowLabel) のみ"
+            isLoadingCodex = false
             updateTitle()
             scheduleNextCodexAutoRefresh()
             rebuildMenu()
             return
         }
 
-        latestCodexError = "取得中…"
+        latestCodexError = nil
+        isLoadingCodex = true
         updateTitle()
         rebuildMenu()
 
@@ -855,6 +774,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 await MainActor.run {
                     self.latestCodex = snap
                     self.latestCodexError = nil
+                    self.isLoadingCodex = false
                     self.showWeeklyLimitAlertIfNeeded(service: "Codex", track: self.weeklyLimitTrack(from: snap))
                     self.updateTitle()
                     self.scheduleNextCodexAutoRefresh()
@@ -863,6 +783,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             } catch {
                 await MainActor.run {
                     self.latestCodexError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                    self.isLoadingCodex = false
                     self.updateTitle()
                     self.scheduleNextCodexAutoRefresh()
                     self.rebuildMenu()
@@ -1162,14 +1083,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         return calendar
     }
 
-    private func selectedClaudeOrgUUID() -> String? {
-        config.selectedClaudeOrgUUID ?? latestClaudeOrganizations.first?.uuid
-    }
-
-    private func selectedClaudeOrganization() -> ClaudeOrganization? {
-        guard let uuid = selectedClaudeOrgUUID() else { return nil }
-        return latestClaudeOrganizations.first(where: { $0.uuid == uuid })
-    }
 }
 
 private struct SVGIcon {
