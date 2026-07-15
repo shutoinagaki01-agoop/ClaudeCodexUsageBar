@@ -15,8 +15,8 @@ macOS のメニューバーに **Claude** と **Codex** の残り使用量と次
 
 - macOS 12 (Monterey) 以降
 - Xcode Command Line Tools (`xcode-select --install`) もしくは Xcode 本体
-- Claude 機能を使う場合: Claude Code / Claude CLI でログイン済み
-- Codex 機能を使う場合: [Codex CLI](https://github.com/openai/codex) で `codex login` 済み
+- Claude 機能を使う場合: Claude CLI でログイン済み
+- Codex 機能を使う場合: Codex CLI でログイン済み
 
 ## 事前準備
 Claude, Codex が保存する OAuth 認証情報を利用するため、以下のコマンドで事前にログインしてください。
@@ -62,8 +62,6 @@ open build/ClaudeCodexUsageBar.app
 - ピーク時間
 - ピーク時の更新間隔
 - 通常時の更新間隔
-
-設定は macOS の `UserDefaults` に保存されるため、変更後の再ビルドは不要です。
 
 ## weekly limit 通知
 
