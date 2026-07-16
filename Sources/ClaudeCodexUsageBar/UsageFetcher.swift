@@ -40,46 +40,90 @@ final class UsageFetcher {
     }
 
     func fetchUsage() async throws -> UsageSnapshot {
-        guard var credentials = loadClaudeOAuthCredentials() else {
+        guard let record = loadClaudeOAuthCredentials() else {
             throw FetchError.missingClaudeOAuthCredentials
         }
+        var credentials = record.credentials
 
         do {
             if credentials.isExpired {
                 credentials = try await refreshClaudeOAuthCredentials(credentials)
+                saveClaudeOAuthCredentials(credentials, to: record)
             }
             return try await fetchOAuthUsage(credentials: credentials)
         } catch FetchError.unauthorized {
             credentials = try await refreshClaudeOAuthCredentials(credentials)
+            saveClaudeOAuthCredentials(credentials, to: record)
             return try await fetchOAuthUsage(credentials: credentials)
         }
     }
 
     // MARK: - Claude OAuth
 
-    private func loadClaudeOAuthCredentials() -> ClaudeOAuthCredentials? {
+    private func loadClaudeOAuthCredentials() -> ClaudeOAuthCredentialRecord? {
         if let data = try? Data(contentsOf: claudeCredentialsURL),
            let credentials = parseClaudeOAuthCredentials(from: data) {
-            return credentials
+            return ClaudeOAuthCredentialRecord(
+                credentials: credentials,
+                source: .file(claudeCredentialsURL),
+                rawData: data,
+                modifiedAt: fileModificationDate(claudeCredentialsURL)
+            )
         }
 
-        for candidate in claudeOAuthKeychainCandidates {
-            if let data = loadGenericPasswordData(service: candidate.service, account: candidate.account),
-               let credentials = parseClaudeOAuthCredentials(from: data) {
-                return credentials
+        return deduplicatedClaudeOAuthKeychainCandidates()
+            .flatMap { loadGenericPasswordRecords(service: $0.service, account: $0.account) }
+            .compactMap { item -> ClaudeOAuthCredentialRecord? in
+                guard let credentials = parseClaudeOAuthCredentials(from: item.data) else { return nil }
+                return ClaudeOAuthCredentialRecord(
+                    credentials: credentials,
+                    source: .keychain(service: item.service, account: item.account),
+                    rawData: item.data,
+                    modifiedAt: item.modifiedAt
+                )
             }
-        }
-
-        return nil
+            .sorted { ($0.modifiedAt ?? .distantPast) > ($1.modifiedAt ?? .distantPast) }
+            .first
     }
 
     private var claudeOAuthKeychainCandidates: [(service: String?, account: String?)] {
         [
-            ("Claude Code-credentials", nil),
-            (nil, "Claude Code-credentials"),
             ("Claude Code", "Claude Code-credentials"),
             ("Claude Code-credentials", "Claude Code-credentials"),
         ]
+    }
+
+    private func deduplicatedClaudeOAuthKeychainCandidates() -> [(service: String?, account: String?)] {
+        var seen = Set<String>()
+        return (claudeOAuthKeychainCandidates + discoverClaudeCodeCredentialKeychainCandidates()).filter { candidate in
+            let key = "\(candidate.service ?? "")\u{1f}\(candidate.account ?? "")"
+            guard !seen.contains(key) else { return false }
+            seen.insert(key)
+            return true
+        }
+    }
+
+    private func discoverClaudeCodeCredentialKeychainCandidates() -> [(service: String?, account: String?)] {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecReturnAttributes as String: true,
+            kSecMatchLimit as String: kSecMatchLimitAll,
+        ]
+
+        var result: AnyObject?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        guard status == errSecSuccess else { return [] }
+
+        let items = result as? [[String: Any]] ?? []
+        return items.compactMap { item -> (service: String?, account: String?)? in
+            let service = item[kSecAttrService as String] as? String
+            let account = item[kSecAttrAccount as String] as? String
+            let label = item[kSecAttrLabel as String] as? String
+            guard service == "Claude Code-credentials" || label == "Claude Code-credentials" else {
+                return nil
+            }
+            return (service: service, account: account)
+        }
     }
 
     private func parseClaudeOAuthCredentials(from data: Data) -> ClaudeOAuthCredentials? {
@@ -95,6 +139,51 @@ final class UsageFetcher {
             rateLimitTier: oauth["rateLimitTier"] as? String,
             subscriptionType: oauth["subscriptionType"] as? String
         )
+    }
+
+    private func saveClaudeOAuthCredentials(_ credentials: ClaudeOAuthCredentials, to record: ClaudeOAuthCredentialRecord) {
+        guard let data = updatedClaudeOAuthCredentialData(credentials, basedOn: record.rawData) else { return }
+
+        switch record.source {
+        case .file(let url):
+            try? data.write(to: url, options: .atomic)
+        case .keychain(let service, let account):
+            var query: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+            ]
+            if let service {
+                query[kSecAttrService as String] = service
+            }
+            if let account {
+                query[kSecAttrAccount as String] = account
+            }
+            let attributes: [String: Any] = [
+                kSecValueData as String: data,
+            ]
+            SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
+        }
+    }
+
+    private func updatedClaudeOAuthCredentialData(_ credentials: ClaudeOAuthCredentials, basedOn data: Data) -> Data? {
+        guard var root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              var oauth = root["claudeAiOauth"] as? [String: Any]
+        else {
+            return nil
+        }
+
+        oauth["accessToken"] = credentials.accessToken
+        oauth["refreshToken"] = credentials.refreshToken
+        oauth["expiresAt"] = credentials.expiresAt.map { Int($0.timeIntervalSince1970 * 1000) }
+        oauth["scopes"] = credentials.scopes
+        if let rateLimitTier = credentials.rateLimitTier {
+            oauth["rateLimitTier"] = rateLimitTier
+        }
+        if let subscriptionType = credentials.subscriptionType {
+            oauth["subscriptionType"] = subscriptionType
+        }
+        root["claudeAiOauth"] = oauth
+
+        return try? JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys])
     }
 
     private func fetchOAuthUsage(credentials: ClaudeOAuthCredentials) async throws -> UsageSnapshot {
@@ -200,11 +289,13 @@ final class UsageFetcher {
         }
     }
 
-    private func loadGenericPasswordData(service: String?, account: String?) -> Data? {
+    private func loadGenericPasswordRecords(service: String?, account: String?) -> [GenericPasswordRecord] {
+        guard service != nil || account != nil else { return [] }
+
         var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
+            kSecReturnAttributes as String: true,
         ]
         if let service {
             query[kSecAttrService as String] = service
@@ -212,11 +303,32 @@ final class UsageFetcher {
         if let account {
             query[kSecAttrAccount as String] = account
         }
+        let expectsSingleItem = service != nil && account != nil
+        query[kSecMatchLimit as String] = expectsSingleItem ? kSecMatchLimitOne : kSecMatchLimitAll
 
         var result: AnyObject?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
-        guard status == errSecSuccess else { return nil }
-        return result as? Data
+        guard status == errSecSuccess else { return [] }
+
+        let items: [[String: Any]]
+        if let item = result as? [String: Any] {
+            items = [item]
+        } else {
+            items = result as? [[String: Any]] ?? []
+        }
+        return items.compactMap { item in
+            guard let data = item[kSecValueData as String] as? Data else { return nil }
+            return GenericPasswordRecord(
+                data: data,
+                service: item[kSecAttrService as String] as? String,
+                account: item[kSecAttrAccount as String] as? String,
+                modifiedAt: item[kSecAttrModificationDate as String] as? Date
+            )
+        }
+    }
+
+    private func fileModificationDate(_ url: URL) -> Date? {
+        (try? FileManager.default.attributesOfItem(atPath: url.path)[.modificationDate]) as? Date
     }
 
     // MARK: - 解析: 枠オブジェクトの発見
@@ -402,6 +514,25 @@ final class UsageFetcher {
         return f.date(from: noFrac)
     }
 
+}
+
+private struct ClaudeOAuthCredentialRecord {
+    let credentials: ClaudeOAuthCredentials
+    let source: ClaudeOAuthCredentialSource
+    let rawData: Data
+    let modifiedAt: Date?
+}
+
+private enum ClaudeOAuthCredentialSource {
+    case file(URL)
+    case keychain(service: String?, account: String?)
+}
+
+private struct GenericPasswordRecord {
+    let data: Data
+    let service: String?
+    let account: String?
+    let modifiedAt: Date?
 }
 
 /// レスポンスを ~/Library/Application Support/ClaudeCodexUsageBar/ にダンプする。
