@@ -29,6 +29,7 @@ final class UsageFetcher {
     private let claudeOAuthClientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
     private let claudeCredentialsURL = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent(".claude/.credentials.json")
+    private var cachedClaudeOAuthCredentialRecord: ClaudeOAuthCredentialRecord?
 
     init() {
         let config = URLSessionConfiguration.ephemeral
@@ -61,17 +62,23 @@ final class UsageFetcher {
     // MARK: - Claude OAuth
 
     private func loadClaudeOAuthCredentials() -> ClaudeOAuthCredentialRecord? {
+        if let cachedClaudeOAuthCredentialRecord {
+            return cachedClaudeOAuthCredentialRecord
+        }
+
         if let data = try? Data(contentsOf: claudeCredentialsURL),
            let credentials = parseClaudeOAuthCredentials(from: data) {
-            return ClaudeOAuthCredentialRecord(
+            let record = ClaudeOAuthCredentialRecord(
                 credentials: credentials,
                 source: .file(claudeCredentialsURL),
                 rawData: data,
                 modifiedAt: fileModificationDate(claudeCredentialsURL)
             )
+            cachedClaudeOAuthCredentialRecord = record
+            return record
         }
 
-        return deduplicatedClaudeOAuthKeychainCandidates()
+        let record = deduplicatedClaudeOAuthKeychainCandidates()
             .flatMap { loadGenericPasswordRecords(service: $0.service, account: $0.account) }
             .compactMap { item -> ClaudeOAuthCredentialRecord? in
                 guard let credentials = parseClaudeOAuthCredentials(from: item.data) else { return nil }
@@ -84,6 +91,8 @@ final class UsageFetcher {
             }
             .sorted { ($0.modifiedAt ?? .distantPast) > ($1.modifiedAt ?? .distantPast) }
             .first
+        cachedClaudeOAuthCredentialRecord = record
+        return record
     }
 
     private var claudeOAuthKeychainCandidates: [(service: String?, account: String?)] {
@@ -143,6 +152,12 @@ final class UsageFetcher {
 
     private func saveClaudeOAuthCredentials(_ credentials: ClaudeOAuthCredentials, to record: ClaudeOAuthCredentialRecord) {
         guard let data = updatedClaudeOAuthCredentialData(credentials, basedOn: record.rawData) else { return }
+        let updatedRecord = ClaudeOAuthCredentialRecord(
+            credentials: credentials,
+            source: record.source,
+            rawData: data,
+            modifiedAt: Date()
+        )
 
         switch record.source {
         case .file(let url):
@@ -162,6 +177,7 @@ final class UsageFetcher {
             ]
             SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
         }
+        cachedClaudeOAuthCredentialRecord = updatedRecord
     }
 
     private func updatedClaudeOAuthCredentialData(_ credentials: ClaudeOAuthCredentials, basedOn data: Data) -> Data? {
