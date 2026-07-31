@@ -15,8 +15,10 @@ macOS のメニューバーに **Claude** と **Codex** の残り使用量と次
 
 - macOS 12 (Monterey) 以降
 - Xcode Command Line Tools (`xcode-select --install`) もしくは Xcode 本体
-- Claude 機能を使う場合: Claude CLI でログイン済み
+- Claude 機能を使う場合: Claude Code / Claude CLI でログイン済み
 - Codex 機能を使う場合: Codex CLI でログイン済み
+
+なお本アプリはアクセストークンの更新を行わないため、CLI 側を時々起動しておく必要があります。詳細は [認証情報の扱い](#認証情報の扱い) を参照してください。
 
 ## 事前準備
 Claude, Codex が保存する OAuth 認証情報を利用するため、以下のコマンドで事前にログインしてください。
@@ -35,6 +37,24 @@ claude auth login
 codex login
 ```
 
+## 認証情報の扱い
+
+本アプリは Claude Code / Codex CLI が保存した OAuth 認証情報を **読むだけ** です。書き込みも更新も行いません。
+
+| サービス | 読み取り元 | 方法 |
+|---|---|---|
+| Claude | `~/.claude/.credentials.json`、無ければ Keychain の `Claude Code-credentials` | `/usr/bin/security` をサブプロセスとして実行 |
+| Codex | `~/.codex/auth.json` | ファイル読み取り |
+
+アクセストークンの更新は Claude Code / Codex CLI に任せています。第三者アプリがリフレッシュトークンを使うと、サーバ側でトークンがローテーションされた際に CLI 側に古いトークンが残り、**CLI をログアウトさせてしまう**ためです。
+
+この設計上の帰結として、**Claude Code / Codex CLI を長時間起動していないとアクセストークンが更新されず、使用量を表示できません**。その場合はメニューバーに次のように表示されます。
+
+- `Claude auth expired. Start Claude Code, or run claude auth login.`
+- `Codex auth expired. Run codex login again.`
+
+Claude Code / Codex CLI を起動すればトークンが更新され、次の自動更新（認証切れ中は 10 分間隔）で自動的に復帰します。⌘R を押せばその場で再試行します。
+
 ## アプリの起動
 
 ```bash
@@ -52,6 +72,7 @@ open build/ClaudeCodexUsageBar.app
 | 通常時の自動更新間隔 | **JST 11:00–16:00 は 3 分、それ以外は 5 分** | 5h / 7d 枠ともに残量がある間 |
 | 自動更新の時間帯 | **JST 09:30–21:00** | 深夜〜朝はサーバー負荷とレートリミットを避けるため停止 |
 | 5h 枯渇時 | **次のリセット時刻まで待機**（取れない場合 1 時間後にリトライ） | 0% に張り付いている間に無駄打ちしない |
+| 認証切れ時 | **10 分間隔** | API は呼ばず、認証情報の読み直しだけ行う。CLI 側がトークンを更新したら自動復帰 |
 | 時間帯外 | メニューバーに「自動更新は JST 09:30-21:00 のみ」と表示 | 手動更新（⌘R）はいつでも可能 |
 
 ### 取得間隔・時刻を変更したい場合
@@ -100,7 +121,7 @@ Codex 更新: 14:21:08
 
 | 項目 | 動作 |
 |---|---|
-| Claude/Codexの残量を手動で更新 | 即座に両方を再取得 (`⌘R`) |
+| Claude/Codexの残量を手動で更新 | 即座に両方を再取得 (`⌘R`)。認証切れで自動更新が通信を止めている場合も、認証情報を読み直して 1 回だけ強制的に再試行する |
 | Codex 使用量をリセット: 残りN回 | 確認後、Codex のリセット可能回数を1回消費して使用量をリセット。残り0回の場合は押せません |
 | 詳細設定 > 時間設定を変更… | 起動時間、ピーク時間、更新間隔を変更 |
 | 終了 | アプリ停止 (`⌘Q`) |
@@ -108,12 +129,35 @@ Codex 更新: 14:21:08
 
 ## トラブルシューティング
 
+### Claude Code 起動ごとに Keychain のパスワードを聞かれる
+
+```
+security がキーチェーンに含まれるキー "Claude Code-credentials" へアクセスしようとしています。
+許可するにはキーチェーン "ログイン" のパスワードを入力してください。
+```
+
+このダイアログが毎回出る場合、Keychain 項目のパーティションリストから `apple-tool:` が失われています。「常に許可」を押しても直りません（信頼アプリのリストとは別のゲートなので）。一度だけ次を実行してください。
+
+```bash
+security set-generic-password-partition-list -S apple-tool:,apple: -s "Claude Code-credentials" -a "$USER"
+```
+
+ログイン Keychain のパスワードを求められます（2 回聞かれることがあります）。
+
+原因は本アプリの以前のバージョンです。`SecItemUpdate` で Keychain 項目を直接書き換えており、その際にパーティションリストがアプリ自身の署名ハッシュ（`cdhash:`）だけに狭められ、同じ項目を `/usr/bin/security` 経由で読む Claude Code が弾かれていました。ad-hoc 署名でビルドごとに `cdhash` が変わるため、再ビルドするたびに再発していました。
+
+現在は `/usr/bin/security` 経由でしか Keychain を読まず、書き込みも行いません。**`./build.sh` で再ビルドしても再発しません。**
+
+### その他
+
 | 症状 | 対処 |
 |---|---|
-| 起動時に「Keychainログイン」のパスワードを聞かれる | macOS が ad-hoc 署名アプリの Keychain アクセスを確認している正常動作。「**常に許可**」を押す。`./build.sh` で再ビルドすると署名ハッシュが変わるためまた聞かれる |
-| `Claude auth not found. Run \`claude auth login\` first.` | `claude auth login` を実行する |
-| `Claude auth expired. Run \`claude auth login\` again.` | `claude auth login` を再実行する |
+| `Claude auth not found. Run claude auth login first.` | `claude auth login` を実行する |
+| `Claude auth expired. Start Claude Code, or run claude auth login.` | Claude Code を起動する（アクセストークンが更新される）。それでも直らなければ `claude auth login` を再実行 |
+| `Codex auth expired. Run codex login again.` | `codex login` を再実行する |
 | 「Codex auth not found」 | `codex login` を実行して `~/.codex/auth.json` を作る |
+| `Auth rejected (HTTP 401).` | 通常は表示されない内部エラー。出た場合は不具合として報告してください |
+| `HTTP 403: ...` | 権限・プラン起因。Codex のリセットクレジットなど、契約プランで使えない機能を叩いた場合に出る |
 | 「自動更新は JST 09:30-21:00 のみ」 | 仕様。手動更新したいときは ⌘R |
 | weekly limit 通知が出ない | **システム設定 > 通知 > ClaudeCodexUsageBar** がONか確認。画面共有・ミラーリング中は **「画面をミラーリングまたは共有しているときに通知を許可」** もONにする |
 
