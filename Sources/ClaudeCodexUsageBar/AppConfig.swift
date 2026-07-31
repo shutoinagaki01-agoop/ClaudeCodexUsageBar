@@ -19,6 +19,19 @@ struct AppConfig {
     let selectedClaudeMenuBarTrackLabel: String?
     let selectedCodexMenuBarTrackLabel: String?
 
+    /// 認証切れを検出している間の自動更新間隔。
+    ///
+    /// この状態ではアプリ側から復帰させる手段が無い（自前リフレッシュはしない）ので、
+    /// 通常の 3〜5 分間隔は続けない。
+    ///
+    /// この間隔で行うのはキーチェーン / `auth.json` の読み直しだけで、API は叩かない。
+    /// 各 fetcher が拒否済みアクセストークンのダイジェストを覚えており、
+    /// 認証情報が入れ替わるまで API 呼び出しを打ち切るため。
+    /// したがって極端に長くしても通信量は変わらず、Claude Code / Codex CLI 側が
+    /// 更新済みでも表示が古いままになる時間が伸びるだけになる。
+    /// その折り合いとして 10 分を採る。手動更新はこの間隔を待たずに実行できる。
+    static let authExpiredRefreshInterval: TimeInterval = 10 * 60
+
     static func load() -> AppConfig {
         let defaults = UserDefaults.standard
         return AppConfig(

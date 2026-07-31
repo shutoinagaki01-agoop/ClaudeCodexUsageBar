@@ -1,5 +1,4 @@
 import Foundation
-import Security
 
 /// Claude Code / Claude CLI の OAuth 認証情報を使って Claude の利用量を取得するクライアント。
 ///
@@ -21,15 +20,29 @@ import Security
 ///
 /// 仕様変更が起きた時のために、レスポンスは生 JSON のままダンプして
 /// `~/Library/Application Support/ClaudeCodexUsageBar/last_response.json` に保存する。
+/// 認証情報はダンプ対象に含めない。
+///
+/// ## 認証情報は読み取り専用に扱う
+///
+/// このクライアントは Claude Code の認証情報を **読むだけ** で、リフレッシュも保存もしない。
+/// 自前でリフレッシュすると、サーバがリフレッシュトークンをローテーションした場合に
+/// Claude Code 側に古いトークンが残り、Claude Code をログアウトさせ得る。
+/// トークンの更新は Claude Code 本体に任せ、こちらは期限切れを検出したら
+/// キャッシュを捨てて読み直すだけにする。
 final class UsageFetcher {
 
     private let session: URLSession
     private let claudeOAuthUsageURL = URL(string: "https://api.anthropic.com/api/oauth/usage")!
-    private let claudeOAuthTokenURL = URL(string: "https://platform.claude.com/v1/oauth/token")!
-    private let claudeOAuthClientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
     private let claudeCredentialsURL = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent(".claude/.credentials.json")
-    private var cachedClaudeOAuthCredentialRecord: ClaudeOAuthCredentialRecord?
+    private var cachedClaudeOAuthCredentials: ClaudeOAuthCredentials?
+    /// 401 で拒否されたアクセストークンのダイジェスト。
+    ///
+    /// 拒否されたトークンは認証情報が入れ替わるまで何度投げても 401 なので、
+    /// これを覚えておいて API 呼び出し自体を打ち切る。成功したら破棄する。
+    /// `expiresAt` が未来（あるいは無い）のまま失効するケースがあるため、
+    /// `isExpired` だけでは足りない。
+    private var rejectedAccessTokenDigest: String?
 
     init() {
         let config = URLSessionConfiguration.ephemeral
@@ -40,99 +53,116 @@ final class UsageFetcher {
         self.session = URLSession(configuration: config)
     }
 
-    func fetchUsage() async throws -> UsageSnapshot {
-        guard let record = loadClaudeOAuthCredentials() else {
+    /// - Parameter forceRejectedTokenRetry: 明示的な手動更新から呼ばれた時だけ true。
+    ///   キャッシュを破棄して最新の認証情報を読み直した上で、拒否済みマークと
+    ///   期限切れ判定の両方を無視して 1 回だけ強制的に試す。
+    ///
+    ///   拒否済みマークは事前にクリアしない。ゲートの通過は下の
+    ///   `forceRejectedTokenRetry ||` が担っており、事前にクリアすると
+    ///   通信エラーや 5xx で終わった場合（`.unauthorized` 以外は外へ抜ける）に
+    ///   拒否状態を失い、次の自動更新で同じトークンを再送してしまう。
+    ///   解除は 200 が返った時にだけ行う。
+    ///
+    ///   自動更新（タイマー、スリープ復帰、起動時）では常に false のままにする。
+    ///   Claude Code が動いていなければトークンは更新されないので、停止状態から
+    ///   抜ける手段としてこの強制経路が必要になる。
+    ///   再度 401 なら `requestUsage` が拒否済みマークを付け直すので、
+    ///   連続通信にはならない。
+    func fetchUsage(forceRejectedTokenRetry: Bool = false) async throws -> UsageSnapshot {
+        if forceRejectedTokenRetry {
+            cachedClaudeOAuthCredentials = nil
+        }
+
+        guard let credentials = loadClaudeOAuthCredentials() else {
             throw FetchError.missingClaudeOAuthCredentials
         }
-        var credentials = record.credentials
 
-        do {
-            if credentials.isExpired {
-                credentials = try await refreshClaudeOAuthCredentials(credentials)
-                saveClaudeOAuthCredentials(credentials, to: record)
+        // 期限切れ、または前回 401 で拒否されたトークンのままなら API を叩かない。
+        // その状態で投げても 401 が返るだけなので、認証情報が入れ替わるのを待つ。
+        if forceRejectedTokenRetry || canAttempt(credentials) {
+            do {
+                return try await requestUsage(credentials: credentials)
+            } catch FetchError.unauthorized {
+                // 読み直しに進む
             }
+        }
+
+        // 読み直して「別のトークンかつ使える」時だけ 1 回だけ試す。
+        guard let reloaded = reloadedCredentialsIfUsable(previous: credentials) else {
+            throw FetchError.claudeAuthExpired
+        }
+        do {
+            return try await requestUsage(credentials: reloaded)
+        } catch FetchError.unauthorized {
+            // 更新後のトークンでも 401 なら、アプリ側から復帰させる手段は無い。
+            // .unauthorized を外に出すと共通のエラー文で表示されてしまうため変換する。
+            throw FetchError.claudeAuthExpired
+        }
+    }
+
+    // MARK: - Claude OAuth（読み取り専用）
+
+    /// API を叩く価値がある状態か。
+    private func canAttempt(_ credentials: ClaudeOAuthCredentials) -> Bool {
+        !credentials.isExpired && credentials.accessTokenDigest != rejectedAccessTokenDigest
+    }
+
+    /// 利用量を取得し、401 だったトークンを覚える。API 呼び出しは必ずここを通す。
+    /// 拒否済みマークの解除は「200 が返った時点」で `fetchOAuthUsage` が行う。
+    private func requestUsage(credentials: ClaudeOAuthCredentials) async throws -> UsageSnapshot {
+        do {
             return try await fetchOAuthUsage(credentials: credentials)
         } catch FetchError.unauthorized {
-            credentials = try await refreshClaudeOAuthCredentials(credentials)
-            saveClaudeOAuthCredentials(credentials, to: record)
-            return try await fetchOAuthUsage(credentials: credentials)
+            rejectedAccessTokenDigest = credentials.accessTokenDigest
+            throw FetchError.unauthorized
         }
     }
 
-    // MARK: - Claude OAuth
+    /// キャッシュを破棄して認証情報を読み直し、再試行に使えるものだけを返す。
+    ///
+    /// 「使える」条件は次の 2 つを満たすこと。どちらか欠けたら nil を返し、
+    /// 呼び出し側は API を叩かずに認証切れとして扱う。
+    ///   1. アクセストークンが前回と異なる（= Claude Code が更新した）
+    ///   2. 期限切れでなく、かつ 401 で拒否されたトークンでない
+    private func reloadedCredentialsIfUsable(previous: ClaudeOAuthCredentials) -> ClaudeOAuthCredentials? {
+        cachedClaudeOAuthCredentials = nil
+        guard let reloaded = loadClaudeOAuthCredentials() else { return nil }
+        guard reloaded.accessTokenDigest != previous.accessTokenDigest else { return nil }
+        guard canAttempt(reloaded) else { return nil }
+        return reloaded
+    }
 
-    private func loadClaudeOAuthCredentials() -> ClaudeOAuthCredentialRecord? {
-        if let cachedClaudeOAuthCredentialRecord {
-            return cachedClaudeOAuthCredentialRecord
+    private func loadClaudeOAuthCredentials() -> ClaudeOAuthCredentials? {
+        if let cachedClaudeOAuthCredentials {
+            return cachedClaudeOAuthCredentials
         }
 
-        if let data = try? Data(contentsOf: claudeCredentialsURL),
-           let credentials = parseClaudeOAuthCredentials(from: data) {
-            let record = ClaudeOAuthCredentialRecord(
-                credentials: credentials,
-                source: .file(claudeCredentialsURL),
-                rawData: data,
-                modifiedAt: fileModificationDate(claudeCredentialsURL)
-            )
-            cachedClaudeOAuthCredentialRecord = record
-            return record
-        }
+        let credentials = loadCredentialsFromFile() ?? loadCredentialsFromKeychain()
+        cachedClaudeOAuthCredentials = credentials
+        return credentials
+    }
 
-        let record = deduplicatedClaudeOAuthKeychainCandidates()
-            .flatMap { loadGenericPasswordRecords(service: $0.service, account: $0.account) }
-            .compactMap { item -> ClaudeOAuthCredentialRecord? in
-                guard let credentials = parseClaudeOAuthCredentials(from: item.data) else { return nil }
-                return ClaudeOAuthCredentialRecord(
-                    credentials: credentials,
-                    source: .keychain(service: item.service, account: item.account),
-                    rawData: item.data,
-                    modifiedAt: item.modifiedAt
-                )
+    private func loadCredentialsFromFile() -> ClaudeOAuthCredentials? {
+        guard let data = try? Data(contentsOf: claudeCredentialsURL) else { return nil }
+        return parseClaudeOAuthCredentials(from: data)
+    }
+
+    /// Claude Code が使う service 名。先に見つかった方を採用する。
+    private let claudeKeychainServices = ["Claude Code-credentials", "Claude Code"]
+
+    private func loadCredentialsFromKeychain() -> ClaudeOAuthCredentials? {
+        for service in claudeKeychainServices {
+            // account は環境によって異なる（ユーザ名が入る）ので属性から拾う。
+            // 拾えなければ service だけで引く。
+            let account = SecurityCLI.genericPasswordAccount(service: service)
+            guard let data = SecurityCLI.genericPassword(service: service, account: account),
+                  let credentials = parseClaudeOAuthCredentials(from: data)
+            else {
+                continue
             }
-            .sorted { ($0.modifiedAt ?? .distantPast) > ($1.modifiedAt ?? .distantPast) }
-            .first
-        cachedClaudeOAuthCredentialRecord = record
-        return record
-    }
-
-    private var claudeOAuthKeychainCandidates: [(service: String?, account: String?)] {
-        [
-            ("Claude Code", "Claude Code-credentials"),
-            ("Claude Code-credentials", "Claude Code-credentials"),
-        ]
-    }
-
-    private func deduplicatedClaudeOAuthKeychainCandidates() -> [(service: String?, account: String?)] {
-        var seen = Set<String>()
-        return (claudeOAuthKeychainCandidates + discoverClaudeCodeCredentialKeychainCandidates()).filter { candidate in
-            let key = "\(candidate.service ?? "")\u{1f}\(candidate.account ?? "")"
-            guard !seen.contains(key) else { return false }
-            seen.insert(key)
-            return true
+            return credentials
         }
-    }
-
-    private func discoverClaudeCodeCredentialKeychainCandidates() -> [(service: String?, account: String?)] {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecReturnAttributes as String: true,
-            kSecMatchLimit as String: kSecMatchLimitAll,
-        ]
-
-        var result: AnyObject?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        guard status == errSecSuccess else { return [] }
-
-        let items = result as? [[String: Any]] ?? []
-        return items.compactMap { item -> (service: String?, account: String?)? in
-            let service = item[kSecAttrService as String] as? String
-            let account = item[kSecAttrAccount as String] as? String
-            let label = item[kSecAttrLabel as String] as? String
-            guard service == "Claude Code-credentials" || label == "Claude Code-credentials" else {
-                return nil
-            }
-            return (service: service, account: account)
-        }
+        return nil
     }
 
     private func parseClaudeOAuthCredentials(from data: Data) -> ClaudeOAuthCredentials? {
@@ -142,7 +172,6 @@ final class UsageFetcher {
         let expiresAt = numeric(oauth["expiresAt"]).map { Date(timeIntervalSince1970: $0 / 1000.0) }
         return ClaudeOAuthCredentials(
             accessToken: accessToken,
-            refreshToken: oauth["refreshToken"] as? String,
             expiresAt: expiresAt,
             scopes: oauth["scopes"] as? [String] ?? [],
             rateLimitTier: oauth["rateLimitTier"] as? String,
@@ -150,60 +179,11 @@ final class UsageFetcher {
         )
     }
 
-    private func saveClaudeOAuthCredentials(_ credentials: ClaudeOAuthCredentials, to record: ClaudeOAuthCredentialRecord) {
-        guard let data = updatedClaudeOAuthCredentialData(credentials, basedOn: record.rawData) else { return }
-        let updatedRecord = ClaudeOAuthCredentialRecord(
-            credentials: credentials,
-            source: record.source,
-            rawData: data,
-            modifiedAt: Date()
-        )
-
-        switch record.source {
-        case .file(let url):
-            try? data.write(to: url, options: .atomic)
-        case .keychain(let service, let account):
-            var query: [String: Any] = [
-                kSecClass as String: kSecClassGenericPassword,
-            ]
-            if let service {
-                query[kSecAttrService as String] = service
-            }
-            if let account {
-                query[kSecAttrAccount as String] = account
-            }
-            let attributes: [String: Any] = [
-                kSecValueData as String: data,
-            ]
-            SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
-        }
-        cachedClaudeOAuthCredentialRecord = updatedRecord
-    }
-
-    private func updatedClaudeOAuthCredentialData(_ credentials: ClaudeOAuthCredentials, basedOn data: Data) -> Data? {
-        guard var root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              var oauth = root["claudeAiOauth"] as? [String: Any]
-        else {
-            return nil
-        }
-
-        oauth["accessToken"] = credentials.accessToken
-        oauth["refreshToken"] = credentials.refreshToken
-        oauth["expiresAt"] = credentials.expiresAt.map { Int($0.timeIntervalSince1970 * 1000) }
-        oauth["scopes"] = credentials.scopes
-        if let rateLimitTier = credentials.rateLimitTier {
-            oauth["rateLimitTier"] = rateLimitTier
-        }
-        if let subscriptionType = credentials.subscriptionType {
-            oauth["subscriptionType"] = subscriptionType
-        }
-        root["claudeAiOauth"] = oauth
-
-        return try? JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys])
-    }
-
     private func fetchOAuthUsage(credentials: ClaudeOAuthCredentials) async throws -> UsageSnapshot {
         let data = try await getOAuthUsage(accessToken: credentials.accessToken)
+        // 200 が返った時点でトークンは有効。この後の解析失敗は認証の問題ではないので、
+        // 拒否済みマークはここで外す。
+        rejectedAccessTokenDigest = nil
         DebugDump.write(data: data, url: claudeOAuthUsageURL)
         guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw FetchError.decodeFailed("Claude OAuth usage: not a JSON object")
@@ -236,7 +216,9 @@ final class UsageFetcher {
             switch http.statusCode {
             case 200..<300:
                 return data
-            case 401, 403:
+            // 403 は権限・エンタイトルメント起因なので認証拒否として扱わない。
+            // 拒否済みマークを付けても再読込では復帰しないため、default の HTTP エラーに落とす。
+            case 401:
                 throw FetchError.unauthorized
             default:
                 let body = String(data: data, encoding: .utf8) ?? ""
@@ -247,104 +229,6 @@ final class UsageFetcher {
         } catch {
             throw FetchError.network(error)
         }
-    }
-
-    private func refreshClaudeOAuthCredentials(_ credentials: ClaudeOAuthCredentials) async throws -> ClaudeOAuthCredentials {
-        guard let refreshToken = credentials.refreshToken, !refreshToken.isEmpty else {
-            throw FetchError.unauthorized
-        }
-
-        var req = URLRequest(url: claudeOAuthTokenURL)
-        req.httpMethod = "POST"
-        req.setValue("application/json", forHTTPHeaderField: "Accept")
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.httpBody = try JSONSerialization.data(withJSONObject: [
-            "grant_type": "refresh_token",
-            "refresh_token": refreshToken,
-            "client_id": claudeOAuthClientID,
-        ])
-
-        do {
-            let (data, response) = try await session.data(for: req)
-            guard let http = response as? HTTPURLResponse else {
-                throw FetchError.network(NSError(domain: "ClaudeCodexUsageBar.ClaudeOAuth", code: -2))
-            }
-            guard (200..<300).contains(http.statusCode) else {
-                if http.statusCode == 401 || http.statusCode == 403 {
-                    throw FetchError.unauthorized
-                }
-                let body = String(data: data, encoding: .utf8) ?? ""
-                throw FetchError.http(http.statusCode, body)
-            }
-            guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let accessToken = json["access_token"] as? String,
-                  !accessToken.isEmpty
-            else {
-                throw FetchError.decodeFailed("Claude OAuth refresh response did not include access_token.")
-            }
-
-            let expiresAt: Date?
-            if let expiresIn = numeric(json["expires_in"]) {
-                expiresAt = Date().addingTimeInterval(expiresIn)
-            } else {
-                expiresAt = credentials.expiresAt
-            }
-            let scopeString = json["scope"] as? String
-            return ClaudeOAuthCredentials(
-                accessToken: accessToken,
-                refreshToken: (json["refresh_token"] as? String) ?? refreshToken,
-                expiresAt: expiresAt,
-                scopes: scopeString?.split(separator: " ").map(String.init) ?? credentials.scopes,
-                rateLimitTier: credentials.rateLimitTier,
-                subscriptionType: credentials.subscriptionType
-            )
-        } catch let e as FetchError {
-            throw e
-        } catch {
-            throw FetchError.network(error)
-        }
-    }
-
-    private func loadGenericPasswordRecords(service: String?, account: String?) -> [GenericPasswordRecord] {
-        guard service != nil || account != nil else { return [] }
-
-        var query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecReturnData as String: true,
-            kSecReturnAttributes as String: true,
-        ]
-        if let service {
-            query[kSecAttrService as String] = service
-        }
-        if let account {
-            query[kSecAttrAccount as String] = account
-        }
-        let expectsSingleItem = service != nil && account != nil
-        query[kSecMatchLimit as String] = expectsSingleItem ? kSecMatchLimitOne : kSecMatchLimitAll
-
-        var result: AnyObject?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        guard status == errSecSuccess else { return [] }
-
-        let items: [[String: Any]]
-        if let item = result as? [String: Any] {
-            items = [item]
-        } else {
-            items = result as? [[String: Any]] ?? []
-        }
-        return items.compactMap { item in
-            guard let data = item[kSecValueData as String] as? Data else { return nil }
-            return GenericPasswordRecord(
-                data: data,
-                service: item[kSecAttrService as String] as? String,
-                account: item[kSecAttrAccount as String] as? String,
-                modifiedAt: item[kSecAttrModificationDate as String] as? Date
-            )
-        }
-    }
-
-    private func fileModificationDate(_ url: URL) -> Date? {
-        (try? FileManager.default.attributesOfItem(atPath: url.path)[.modificationDate]) as? Date
     }
 
     // MARK: - 解析: 枠オブジェクトの発見
@@ -532,23 +416,78 @@ final class UsageFetcher {
 
 }
 
-private struct ClaudeOAuthCredentialRecord {
-    let credentials: ClaudeOAuthCredentials
-    let source: ClaudeOAuthCredentialSource
-    let rawData: Data
-    let modifiedAt: Date?
-}
+/// キーチェーンへの読み取り専用アクセス。
+///
+/// Security framework（`SecItemCopyMatching` / `SecItemUpdate`）を直接呼ばず、
+/// `/usr/bin/security` を子プロセスとして実行する。理由は 2 つある。
+///
+/// 1. 要求元プロセスが Apple 署名の `security` になるため、キーチェーン項目の
+///    ACL / パーティションリストに登録されるのは `apple-tool:` だけになる。
+///    このアプリは ad-hoc 署名なので、直接アクセスするとビルドごとに cdhash が変わり、
+///    そのたびに ACL が増え、パーティションリストが自分の cdhash に狭められて
+///    Claude Code 本体（同じく `security` 経由で読む）が弾かれてしまう。
+/// 2. 書き込み API を一切呼ばないことがコード上で保証される。
+///
+/// `security` はシェルを介さず `executableURL` + 引数配列で直接起動する。
+/// 秘密値は引数ではなく stdout で受け取り、ログにもダンプにも出さない。
+enum SecurityCLI {
+    private static let executableURL = URL(fileURLWithPath: "/usr/bin/security")
 
-private enum ClaudeOAuthCredentialSource {
-    case file(URL)
-    case keychain(service: String?, account: String?)
-}
+    /// 汎用パスワード項目の中身を取り出す。復号を伴うため、初回は認可が必要になる。
+    static func genericPassword(service: String, account: String?) -> Data? {
+        var arguments = ["find-generic-password", "-s", service]
+        if let account, !account.isEmpty {
+            arguments.append(contentsOf: ["-a", account])
+        }
+        arguments.append("-w")
 
-private struct GenericPasswordRecord {
-    let data: Data
-    let service: String?
-    let account: String?
-    let modifiedAt: Date?
+        guard let output = run(arguments) else { return nil }
+        let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        return Data(trimmed.utf8)
+    }
+
+    /// 項目の `acct` 属性だけを読む。復号を伴わないので認可ダイアログは出ない。
+    ///
+    /// Claude Code は account にログインユーザ名を入れるため、環境ごとに値が違う。
+    /// 決め打ちにせずここで拾う。
+    static func genericPasswordAccount(service: String) -> String? {
+        guard let output = run(["find-generic-password", "-s", service]) else { return nil }
+
+        // 出力例: `    "acct"<blob>="shuto.inagaki01"`
+        let marker = "\"acct\"<blob>=\""
+        for line in output.split(separator: "\n") {
+            guard let start = line.range(of: marker) else { continue }
+            let rest = line[start.upperBound...]
+            guard let end = rest.lastIndex(of: "\"") else { continue }
+            let account = String(rest[..<end])
+            return account.isEmpty ? nil : account
+        }
+        return nil
+    }
+
+    private static func run(_ arguments: [String]) -> String? {
+        let process = Process()
+        process.executableURL = executableURL
+        process.arguments = arguments
+
+        let stdout = Pipe()
+        process.standardOutput = stdout
+        process.standardError = FileHandle.nullDevice
+
+        do {
+            try process.run()
+        } catch {
+            return nil
+        }
+
+        // waitUntilExit の前に読み切る（パイプが埋まると deadlock する）
+        let data = stdout.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+
+        guard process.terminationStatus == 0 else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
 }
 
 /// レスポンスを ~/Library/Application Support/ClaudeCodexUsageBar/ にダンプする。

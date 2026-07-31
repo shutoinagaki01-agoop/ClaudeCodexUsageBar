@@ -2,8 +2,16 @@ import Foundation
 
 /// Codex CLI の OAuth 認証を使って Codex の 5h / 7d 利用状況を取得する。
 ///
-/// 認証情報は新規保存せず、Codex CLI が管理する `~/.codex/auth.json` を読む。
+/// 認証情報は Codex CLI が管理する `~/.codex/auth.json` を **読むだけ** で、
+/// 保存もリフレッシュもしない。
 /// このファイルには OAuth token が含まれるため、ログやダンプには出さない。
+///
+/// ## 自前リフレッシュをしない理由
+///
+/// 以前はここで refresh_token を使ってアクセストークンを更新していたが、保存はしていなかった。
+/// サーバがリフレッシュトークンをローテーションすると、新しいトークンは誰も記録しないまま
+/// 古いトークンが `auth.json` に残り、Codex CLI 側をログアウトさせ得る。
+/// 401 を受けたら `auth.json` を読み直し、Codex CLI が更新済みの場合だけ 1 回進む。
 final class CodexUsageFetcher {
 
     private let session: URLSession
@@ -11,8 +19,9 @@ final class CodexUsageFetcher {
     private let usageURL = URL(string: "https://chatgpt.com/backend-api/codex/usage")!
     private let resetCreditListURL = URL(string: "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits")!
     private let resetCreditConsumeURL = URL(string: "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume")!
-    private let tokenURL = URL(string: "https://auth.openai.com/oauth/token")!
-    private let clientID = "app_EMoamEEZ73f0CkXaXp7hrann"
+    /// 401 で拒否されたアクセストークンのダイジェスト。
+    /// `auth.json` に有効期限は無いので、拒否済みかどうかがそのまま唯一の判断材料になる。
+    private var rejectedAccessTokenDigest: String?
 
     init() {
         let config = URLSessionConfiguration.ephemeral
@@ -25,32 +34,101 @@ final class CodexUsageFetcher {
             .appendingPathComponent(".codex/auth.json")
     }
 
-    func fetchUsage() async throws -> CodexUsageSnapshot {
+    /// - Parameter forceRejectedTokenRetry: 明示的な手動更新から呼ばれた時だけ true。
+    ///   拒否済みマークを無視して 1 回だけ強制的に試す。
+    ///   `loadAuth()` は毎回ファイルを読むのでキャッシュ破棄は不要。
+    ///
+    ///   マーク自体は事前にクリアしない。通信エラーや 5xx で終わった場合に
+    ///   拒否状態を失い、次の自動更新で同じトークンを再送してしまうため。
+    ///   解除は 200 が返った時にだけ行う。
+    ///
+    ///   自動更新（タイマー、スリープ復帰、起動時、リセット成功後の再取得）では false のまま。
+    func fetchUsage(forceRejectedTokenRetry: Bool = false) async throws -> CodexUsageSnapshot {
         let auth = try loadAuth()
 
+        // 前回 401 で拒否されたトークンのままなら API を叩かない。
+        if forceRejectedTokenRetry || canAttempt(auth) {
+            do {
+                return try await requestUsageSnapshot(auth: auth)
+            } catch FetchError.unauthorized {
+                // 読み直しに進む
+            }
+        }
+
+        // 読み直して「Codex CLI が別のトークンに更新済み」の時だけ 1 回だけ試す。
+        guard let reloaded = reloadedAuthIfUsable(previous: auth) else {
+            throw FetchError.codexAuthExpired
+        }
         do {
-            let data = try await getUsage(accessToken: auth.accessToken, accountID: auth.accountID)
-            DebugDump.writeCodex(data: prettyJSON(data) ?? data)
-            let expiresAt = try? await nextResetCreditExpiration(accessToken: auth.accessToken, accountID: auth.accountID)
-            return try decodeUsage(data, nextResetCreditExpiresAt: expiresAt)
+            return try await requestUsageSnapshot(auth: reloaded)
         } catch FetchError.unauthorized {
-            let refreshed = try await refreshAccessToken(refreshToken: auth.refreshToken)
-            let data = try await getUsage(accessToken: refreshed, accountID: auth.accountID)
-            DebugDump.writeCodex(data: prettyJSON(data) ?? data)
-            let expiresAt = try? await nextResetCreditExpiration(accessToken: refreshed, accountID: auth.accountID)
-            return try decodeUsage(data, nextResetCreditExpiresAt: expiresAt)
+            throw FetchError.codexAuthExpired
         }
     }
 
     func consumeRateLimitResetCredit() async throws {
         let auth = try loadAuth()
 
+        if canAttempt(auth) {
+            do {
+                try await requestConsumeRateLimitResetCredit(auth: auth)
+                return
+            } catch FetchError.unauthorized {
+                // 読み直しに進む
+            }
+        }
+
+        guard let reloaded = reloadedAuthIfUsable(previous: auth) else {
+            throw FetchError.codexAuthExpired
+        }
+        do {
+            try await requestConsumeRateLimitResetCredit(auth: reloaded)
+        } catch FetchError.unauthorized {
+            throw FetchError.codexAuthExpired
+        }
+    }
+
+    /// API を叩く価値がある状態か。
+    private func canAttempt(_ auth: CodexAuth) -> Bool {
+        auth.accessTokenDigest != rejectedAccessTokenDigest
+    }
+
+    /// 401 だったトークンを覚える。API 呼び出しは必ずここを通す。
+    private func requestUsageSnapshot(auth: CodexAuth) async throws -> CodexUsageSnapshot {
+        let data: Data
+        do {
+            data = try await getUsage(accessToken: auth.accessToken, accountID: auth.accountID)
+        } catch FetchError.unauthorized {
+            rejectedAccessTokenDigest = auth.accessTokenDigest
+            throw FetchError.unauthorized
+        }
+
+        // 200 が返った時点でトークンは有効。この後の解析失敗は認証の問題ではない。
+        rejectedAccessTokenDigest = nil
+        DebugDump.writeCodex(data: prettyJSON(data) ?? data)
+        let expiresAt = try? await nextResetCreditExpiration(accessToken: auth.accessToken, accountID: auth.accountID)
+        return try decodeUsage(data, nextResetCreditExpiresAt: expiresAt)
+    }
+
+    private func requestConsumeRateLimitResetCredit(auth: CodexAuth) async throws {
         do {
             try await consumeRateLimitResetCredit(accessToken: auth.accessToken, accountID: auth.accountID)
+            rejectedAccessTokenDigest = nil
         } catch FetchError.unauthorized {
-            let refreshed = try await refreshAccessToken(refreshToken: auth.refreshToken)
-            try await consumeRateLimitResetCredit(accessToken: refreshed, accountID: auth.accountID)
+            rejectedAccessTokenDigest = auth.accessTokenDigest
+            throw FetchError.unauthorized
         }
+    }
+
+    /// `auth.json` を読み直し、前回と違い、かつ拒否済みでないトークンの時だけ返す。
+    ///
+    /// `loadAuth()` は毎回ファイルを読むのでキャッシュ破棄は不要。
+    /// 条件を満たさなければ nil を返し、呼び出し側は API を叩かずに認証切れとして扱う。
+    private func reloadedAuthIfUsable(previous: CodexAuth) -> CodexAuth? {
+        guard let reloaded = try? loadAuth() else { return nil }
+        guard reloaded.accessTokenDigest != previous.accessTokenDigest else { return nil }
+        guard canAttempt(reloaded) else { return nil }
+        return reloaded
     }
 
     private func loadAuth() throws -> CodexAuth {
@@ -58,16 +136,16 @@ final class CodexUsageFetcher {
             throw FetchError.decodeFailed("Codex auth not found. Run `codex login` first.")
         }
         let data = try Data(contentsOf: authURL)
+        // refresh_token は読まない。使わないものを持たない。
         guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               let tokens = root["tokens"] as? [String: Any],
               let accessToken = tokens["access_token"] as? String,
-              let refreshToken = tokens["refresh_token"] as? String
+              !accessToken.isEmpty
         else {
-            throw FetchError.decodeFailed("Codex auth.json does not contain OAuth tokens.")
+            throw FetchError.decodeFailed("Codex auth.json does not contain an access token.")
         }
         return CodexAuth(
             accessToken: accessToken,
-            refreshToken: refreshToken,
             accountID: tokens["account_id"] as? String
         )
     }
@@ -89,7 +167,8 @@ final class CodexUsageFetcher {
         switch http.statusCode {
         case 200..<300:
             return data
-        case 401, 403:
+        // 403 は権限・プラン起因なので認証拒否として扱わない（default の HTTP エラーへ）。
+        case 401:
             throw FetchError.unauthorized
         default:
             let body = String(data: data, encoding: .utf8) ?? ""
@@ -142,7 +221,8 @@ final class CodexUsageFetcher {
         switch http.statusCode {
         case 200..<300:
             break
-        case 401, 403:
+        // 403 は権限・プラン起因なので認証拒否として扱わない（default の HTTP エラーへ）。
+        case 401:
             throw FetchError.unauthorized
         default:
             let body = String(data: data, encoding: .utf8) ?? ""
@@ -202,41 +282,13 @@ final class CodexUsageFetcher {
                 throw FetchError.decodeFailed("Codex reset was not applied: \(outcome)")
             }
             return
-        case 401, 403:
+        // 403 は権限・プラン起因なので認証拒否として扱わない（default の HTTP エラーへ）。
+        case 401:
             throw FetchError.unauthorized
         default:
             let body = String(data: data, encoding: .utf8) ?? ""
             throw FetchError.http(http.statusCode, body)
         }
-    }
-
-    private func refreshAccessToken(refreshToken: String) async throws -> String {
-        var req = URLRequest(url: tokenURL)
-        req.httpMethod = "POST"
-        req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
-        let body = [
-            "grant_type": "refresh_token",
-            "refresh_token": refreshToken,
-            "client_id": clientID,
-        ].map { key, value in
-            "\(urlEncode(key))=\(urlEncode(value))"
-        }.joined(separator: "&")
-        req.httpBody = Data(body.utf8)
-
-        let (data, response) = try await session.data(for: req)
-        guard let http = response as? HTTPURLResponse else {
-            throw FetchError.network(NSError(domain: "ClaudeCodexUsageBar.Codex", code: -2))
-        }
-        guard (200..<300).contains(http.statusCode) else {
-            let body = String(data: data, encoding: .utf8) ?? ""
-            throw FetchError.http(http.statusCode, body)
-        }
-        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let token = json["access_token"] as? String
-        else {
-            throw FetchError.decodeFailed("Codex token refresh response did not include access_token.")
-        }
-        return token
     }
 
     private func decodeUsage(_ data: Data, nextResetCreditExpiresAt: Date?) throws -> CodexUsageSnapshot {
@@ -310,12 +362,6 @@ final class CodexUsageFetcher {
         return max(0, Int(count))
     }
 
-    private func urlEncode(_ value: String) -> String {
-        var allowed = CharacterSet.urlQueryAllowed
-        allowed.remove(charactersIn: "&+=")
-        return value.addingPercentEncoding(withAllowedCharacters: allowed) ?? value
-    }
-
     private func prettyJSON(_ data: Data) -> Data? {
         guard let object = try? JSONSerialization.jsonObject(with: data),
               JSONSerialization.isValidJSONObject(object)
@@ -338,8 +384,13 @@ private extension ISO8601DateFormatter {
     }()
 }
 
+/// `~/.codex/auth.json` から読み取った認証情報。
+/// 読み取り専用に扱うため `refresh_token` は保持しない。
 private struct CodexAuth {
     let accessToken: String
-    let refreshToken: String
     let accountID: String?
+
+    var accessTokenDigest: String {
+        TokenDigest.of(accessToken)
+    }
 }

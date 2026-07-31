@@ -17,6 +17,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private var isResettingCodexUsage = false
     private var nextClaudeAutoRefreshAt: Date?
     private var nextCodexAutoRefreshAt: Date?
+    /// 認証切れを検出している間は自動更新間隔を落とす。詳細は
+    /// `AppConfig.authExpiredRefreshInterval` のコメントを参照。
+    private var isClaudeAuthExpired = false
+    private var isCodexAuthExpired = false
     private var config = AppConfig.load()
     private let weeklyLimitAlertThresholds = [50, 20]
 
@@ -707,12 +711,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
     // MARK: - データ取得
 
+    /// メニューの「更新」から呼ばれる明示的な手動更新。
+    ///
+    /// 認証拒否で停止している状態でも 1 回だけ強制的に試す。
+    /// `isAutomatic: false` は自動更新ウィンドウの判定を外すだけの意味で、
+    /// リセット成功後の再取得もこれに該当するため、強制再試行は別の引数で渡す。
     private func refreshNow() {
-        refreshClaude()
-        refreshCodex()
+        refreshClaude(forceRejectedTokenRetry: true)
+        refreshCodex(forceRejectedTokenRetry: true)
     }
 
-    private func refreshClaude(isAutomatic: Bool = false) {
+    private func refreshClaude(isAutomatic: Bool = false, forceRejectedTokenRetry: Bool = false) {
         if isAutomatic && !isInAutoRefreshWindow() {
             latestError = "自動更新は JST \(config.autoRefreshWindowLabel) のみ"
             isLoadingClaude = false
@@ -730,10 +739,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         Task { [weak self] in
             guard let self = self else { return }
             do {
-                let snap = try await self.fetcher.fetchUsage()
+                let snap = try await self.fetcher.fetchUsage(forceRejectedTokenRetry: forceRejectedTokenRetry)
                 await MainActor.run {
                     self.latest = snap
                     self.latestError = nil
+                    self.isClaudeAuthExpired = false
                     self.isLoadingClaude = false
                     self.showClaudeWeeklyLimitAlertsIfNeeded(from: snap)
                     self.updateTitle()
@@ -743,6 +753,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             } catch {
                 await MainActor.run {
                     self.latestError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                    self.isClaudeAuthExpired = (error as? FetchError)?.isAuthExpired ?? false
                     self.isLoadingClaude = false
                     self.updateTitle()
                     self.scheduleNextClaudeAutoRefresh()
@@ -752,7 +763,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         }
     }
 
-    private func refreshCodex(isAutomatic: Bool = false) {
+    private func refreshCodex(isAutomatic: Bool = false, forceRejectedTokenRetry: Bool = false) {
         if isAutomatic && !isInAutoRefreshWindow() {
             latestCodexError = "自動更新は JST \(config.autoRefreshWindowLabel) のみ"
             isLoadingCodex = false
@@ -770,10 +781,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         Task { [weak self] in
             guard let self = self else { return }
             do {
-                let snap = try await self.codexFetcher.fetchUsage()
+                let snap = try await self.codexFetcher.fetchUsage(forceRejectedTokenRetry: forceRejectedTokenRetry)
                 await MainActor.run {
                     self.latestCodex = snap
                     self.latestCodexError = nil
+                    self.isCodexAuthExpired = false
                     self.isLoadingCodex = false
                     self.showWeeklyLimitAlertIfNeeded(service: "Codex", track: self.weeklyLimitTrack(from: snap))
                     self.updateTitle()
@@ -783,6 +795,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             } catch {
                 await MainActor.run {
                     self.latestCodexError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                    self.isCodexAuthExpired = (error as? FetchError)?.isAuthExpired ?? false
                     self.isLoadingCodex = false
                     self.updateTitle()
                     self.scheduleNextCodexAutoRefresh()
@@ -835,6 +848,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     }
 
     private func nextClaudeRefreshDate(after date: Date) -> Date {
+        // 認証切れ中は利用量を取りに行けないので、枠のリセット時刻を待つ意味も無い。
+        if isClaudeAuthExpired {
+            return date.addingTimeInterval(AppConfig.authExpiredRefreshInterval)
+        }
         if isFiveHourDepleted(), let resetDate = nextFiveHourOrSevenDayReset(after: date) {
             return resetDate.addingTimeInterval(config.resetRefreshBuffer)
         }
@@ -843,6 +860,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     }
 
     private func nextCodexRefreshDate(after date: Date) -> Date {
+        if isCodexAuthExpired {
+            return date.addingTimeInterval(AppConfig.authExpiredRefreshInterval)
+        }
         if isCodexFiveHourDepleted(), let resetDate = nextCodexReset(after: date) {
             return resetDate.addingTimeInterval(config.resetRefreshBuffer)
         }
