@@ -18,7 +18,7 @@ macOS のメニューバーに **Claude** と **Codex** の残り使用量と次
 - Claude 機能を使う場合: Claude Code / Claude CLI でログイン済み
 - Codex 機能を使う場合: Codex CLI でログイン済み
 
-なお本アプリはアクセストークンの更新を行わないため、CLI 側を時々起動しておく必要があります。詳細は [認証情報の扱い](#認証情報の扱い) を参照してください。
+なお本アプリはアクセストークンの更新を行わないため、CLI 側を時々起動しておく必要があります。Claude については、これを回避する [長期トークン](#長期トークンを使う-claude-のみ) の設定も用意しています。詳細は [認証情報の扱い](#認証情報の扱い) を参照してください。
 
 ## 事前準備
 Claude, Codex が保存する OAuth 認証情報を利用するため、以下のコマンドで事前にログインしてください。
@@ -43,17 +43,45 @@ codex login
 
 | サービス | 読み取り元 | 方法 |
 |---|---|---|
-| Claude | `~/.claude/.credentials.json`、無ければ Keychain の `Claude Code-credentials` | `/usr/bin/security` をサブプロセスとして実行 |
+| Claude | 長期トークン（後述）→ `~/.claude/.credentials.json` → Keychain の `Claude Code-credentials` | `/usr/bin/security` をサブプロセスとして実行 |
 | Codex | `~/.codex/auth.json` | ファイル読み取り |
 
 アクセストークンの更新は Claude Code / Codex CLI に任せています。第三者アプリがリフレッシュトークンを使うと、サーバ側でトークンがローテーションされた際に CLI 側に古いトークンが残り、**CLI をログアウトさせてしまう**ためです。
 
-この設計上の帰結として、**Claude Code / Codex CLI を長時間起動していないとアクセストークンが更新されず、使用量を表示できません**。その場合はメニューバーに次のように表示されます。
+この設計上の帰結として、**Claude Code / Codex CLI を長時間起動していないとアクセストークンが更新されず、使用量を表示できません**。Claude のアクセストークンの寿命は **8 時間** なので、夜間放置すると翌朝は失効した状態から始まります。その場合はメニューバーに `⚠︎` が付き、次のように表示されます。
 
 - `Claude auth expired. Start Claude Code, or run claude auth login.`
 - `Codex auth expired. Run codex login again.`
 
 Claude Code / Codex CLI を起動すればトークンが更新され、次の自動更新（認証切れ中は 10 分間隔）で自動的に復帰します。⌘R を押せばその場で再試行します。
+
+### 長期トークンを使う (Claude のみ)
+
+`claude setup-token` が発行する **1 年有効の OAuth トークン** を本アプリに持たせると、上記の 8 時間問題を回避できます。Claude Code の起動状況から独立するため、8 時間ごとの更新は不要で、通常は最大 1 年間利用できます。ただし、途中で取り消された場合は再発行が必要です。
+
+```bash
+# 1. トークンを発行（ブラウザ認証が開きます）
+claude setup-token
+
+# 2. 表示されたトークンをキーチェーンに保存
+#    -w を値なしで渡すと伏せ字入力になり、シェル履歴に残りません
+security add-generic-password -U \
+  -s "com.example.ClaudeCodexUsageBar" \
+  -a "claude.oauth.longLivedToken" -w
+```
+
+保存後、メニューの「Claude/Codexの残量を手動で更新」を実行してください。メニュー先頭が `Claude · 長期トークン` になれば有効です。
+
+やめる場合は項目を削除し、メニューの「Claude/Codexの残量を手動で更新」を実行するか、アプリを再起動してください。Claude Code 認証へ戻ります。
+
+```bash
+security delete-generic-password \
+  -s "com.example.ClaudeCodexUsageBar" -a "claude.oauth.longLivedToken"
+```
+
+補足として、この経路でもトークンは **読むだけ** です。発行も保存も更新も行いません。トークンが拒否された場合は理由（401 かスコープ不足か）を表示し、以後は入れ替えられるまで API を呼びません。トークンを入れ替えれば、手動更新を待たずに次の自動更新で復帰します。
+
+プラン名は長期トークンには付随しないため、`/api/oauth/profile` から 1 回だけ引いて保持します（トークンが入れ替わるまで再取得しません）。この問い合わせが失敗しても利用量の表示は妨げず、プラン名の表示だけが省略されます。
 
 ## アプリの起動
 

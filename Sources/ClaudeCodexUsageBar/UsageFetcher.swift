@@ -33,9 +33,36 @@ final class UsageFetcher {
 
     private let session: URLSession
     private let claudeOAuthUsageURL = URL(string: "https://api.anthropic.com/api/oauth/usage")!
+    /// プラン名の取得先。usage レスポンスにプラン名は含まれないため、
+    /// 認証情報から取れない長期トークン経路でだけ使う。
+    private let claudeOAuthProfileURL = URL(string: "https://api.anthropic.com/api/oauth/profile")!
     private let claudeCredentialsURL = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent(".claude/.credentials.json")
     private var cachedClaudeOAuthCredentials: ClaudeOAuthCredentials?
+
+    /// このアプリ自身が持つ長期トークンの置き場所。
+    ///
+    /// `claude setup-token` が発行する 1 年トークン（`sk-ant-oat...`）を、
+    /// ユーザが `security add-generic-password` で自分で格納する。
+    /// アプリは読むだけで、書き込みも発行も行わない。
+    ///
+    /// service は既存のアプリ用項目と共用し、account だけ分ける。
+    /// 同 service には sessionKey 時代の `claude.ai.sessionKey` が残っているが、
+    /// account が違うので干渉しない。
+    private let longLivedTokenService = "com.example.ClaudeCodexUsageBar"
+    private let longLivedTokenAccount = "claude.oauth.longLivedToken"
+    /// 読み込み済みかどうか。「読んだが未設定」と「未読」を区別するために別に持つ。
+    private var longLivedTokenLoaded = false
+    private var cachedLongLivedToken: String?
+    /// 拒否された長期トークンと、その理由。
+    ///
+    /// Claude Code の認証情報と同じく、拒否済みのまま投げ続けないための門番。
+    /// 理由も持つのは、API を叩かずに同じ説明を UI へ返せるようにするため。
+    private var rejectedLongLivedToken: (digest: String, reason: String)?
+    /// profile から引いたプラン名。トークンが入れ替わるまで使い回す。
+    /// 「解決済みだが取得できなかった」と「未解決」を区別するためにフラグを別に持つ。
+    private var longLivedPlanResolved = false
+    private var cachedLongLivedPlan: String?
     /// 401 で拒否されたアクセストークンのダイジェスト。
     ///
     /// 拒否されたトークンは認証情報が入れ替わるまで何度投げても 401 なので、
@@ -71,6 +98,15 @@ final class UsageFetcher {
     func fetchUsage(forceRejectedTokenRetry: Bool = false) async throws -> UsageSnapshot {
         if forceRejectedTokenRetry {
             cachedClaudeOAuthCredentials = nil
+            longLivedTokenLoaded = false
+            cachedLongLivedToken = nil
+        }
+
+        // 長期トークンがあれば最優先で使い、Claude Code の認証情報は一切見ない。
+        // こちらは 1 年有効なので、8 時間ごとの失効も、Claude Code が
+        // Keychain を更新してくれるかどうかへの依存も無くなる。
+        if let token = loadLongLivedToken() {
+            return try await fetchUsingLongLivedToken(token, force: forceRejectedTokenRetry)
         }
 
         guard let credentials = loadClaudeOAuthCredentials() else {
@@ -98,6 +134,141 @@ final class UsageFetcher {
             // .unauthorized を外に出すと共通のエラー文で表示されてしまうため変換する。
             throw FetchError.claudeAuthExpired
         }
+    }
+
+    // MARK: - 長期トークン（読み取り専用）
+
+    private func loadLongLivedToken() -> String? {
+        if longLivedTokenLoaded {
+            return cachedLongLivedToken
+        }
+        longLivedTokenLoaded = true
+
+        guard let data = SecurityCLI.genericPassword(
+            service: longLivedTokenService,
+            account: longLivedTokenAccount
+        ) else {
+            cachedLongLivedToken = nil
+            return nil
+        }
+
+        let token = String(decoding: data, as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        cachedLongLivedToken = token.isEmpty ? nil : token
+        return cachedLongLivedToken
+    }
+
+    /// 長期トークンでの取得。
+    ///
+    /// 失効判定は無い。1 年トークンなので期限切れを気にする必要が無い。
+    /// 401 と「スコープ不足の 403」だけは、原因が特定できるので専用のエラーに変換する。
+    ///
+    /// - Parameter force: 手動更新から来た時だけ true。拒否済みマークを無視して 1 回試す。
+    private func fetchUsingLongLivedToken(_ token: String, force: Bool) async throws -> UsageSnapshot {
+        let digest = TokenDigest.of(token)
+
+        // 拒否されたトークンは、ユーザが入れ替えるまで何度投げても同じ結果になる。
+        // Claude Code の認証情報と違って勝手に更新されることが無いぶん、
+        // ここで打ち切らないと 10 分ごとに無意味な 401 を投げ続ける。
+        //
+        // 打ち切る時もキャッシュは毎回捨てる。捨てないとキーチェーンを読み直さず、
+        // ユーザがトークンを入れ替えても気付けないまま止まり続ける。
+        if !force, let rejected = rejectedLongLivedToken, rejected.digest == digest {
+            invalidateLongLivedTokenCache()
+            throw FetchError.longLivedTokenInvalid(rejected.reason)
+        }
+
+        do {
+            let data = try await getOAuthUsage(accessToken: token)
+            // 200 が返った時点でトークンは有効。解除はここでだけ行う。
+            rejectedLongLivedToken = nil
+            DebugDump.write(data: data, url: claudeOAuthUsageURL)
+            let plan = await longLivedPlan(accessToken: token)
+            return try makeSnapshot(from: data, planHint: plan, source: .longLivedToken)
+        } catch FetchError.unauthorized {
+            throw rejectLongLivedToken(digest: digest, reason: "HTTP 401")
+        } catch FetchError.http(403, let body) {
+            // 実観測では、権限が足りない時に不足しているスコープ名が本文に入る。
+            // `user:profile` は usage エンドポイントが要求するもの。
+            let scope = ["user:profile", "user:inference"].first { body.contains($0) }
+            let detail = scope.map { "スコープ \($0) が不足しています" } ?? "HTTP 403"
+            throw rejectLongLivedToken(digest: digest, reason: detail)
+        }
+    }
+
+    private func rejectLongLivedToken(digest: String, reason: String) -> FetchError {
+        rejectedLongLivedToken = (digest: digest, reason: reason)
+        invalidateLongLivedTokenCache()
+        return FetchError.longLivedTokenInvalid(reason)
+    }
+
+    /// 長期トークン経路のプラン名。
+    ///
+    /// usage レスポンスにプラン名は無く、長期トークンには認証情報も付随しないので、
+    /// profile エンドポイントから 1 回だけ取ってプロセス内に保持する。
+    /// プラン名は頻繁に変わらないため、取得のたびに問い合わせる必要は無い。
+    ///
+    /// 失敗しても利用量の表示は妨げない。恒久的な拒否（401 / 403）なら以後諦め、
+    /// 通信エラーなら次の取得でもう一度試す。
+    private func longLivedPlan(accessToken: String) async -> String? {
+        if longLivedPlanResolved {
+            return cachedLongLivedPlan
+        }
+
+        do {
+            let data = try await getOAuth(claudeOAuthProfileURL, accessToken: accessToken)
+            longLivedPlanResolved = true
+            cachedLongLivedPlan = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])
+                .flatMap { $0 }
+                .flatMap(extractProfilePlan)
+        } catch FetchError.unauthorized {
+            longLivedPlanResolved = true
+        } catch FetchError.http(403, _) {
+            longLivedPlanResolved = true
+        } catch {
+            // 通信エラーなどの一時的な失敗。解決済みにはせず、次回また試す。
+        }
+        return cachedLongLivedPlan
+    }
+
+    /// profile レスポンスからプラン名を組み立てる。
+    ///
+    /// 実観測では次の形をしている。Claude Code 認証経路の `subscriptionType`
+    /// （"team"）と揃うよう、`claude_` 接頭辞を落とす。
+    /// ```json
+    /// { "account":      { "has_claude_max": false, "has_claude_pro": false },
+    ///   "organization": { "organization_type": "claude_team",
+    ///                     "rate_limit_tier": "default_raven" } }
+    /// ```
+    private func extractProfilePlan(from root: [String: Any]) -> String? {
+        let organization = root["organization"] as? [String: Any]
+
+        if let type = organization?["organization_type"] as? String, !type.isEmpty {
+            return type.hasPrefix("claude_") ? String(type.dropFirst("claude_".count)) : type
+        }
+        // 個人プランには organization_type が無いことがあるので、アカウント側から拾う。
+        if let account = root["account"] as? [String: Any] {
+            if account["has_claude_max"] as? Bool == true { return "max" }
+            if account["has_claude_pro"] as? Bool == true { return "pro" }
+        }
+        if let tier = organization?["rate_limit_tier"] as? String, !tier.isEmpty {
+            return tier
+        }
+        return nil
+    }
+
+    /// 次回の取得でキーチェーンを読み直させる。
+    ///
+    /// 拒否状態の間はこれを毎回呼ぶ。ユーザがトークンを入れ替えたら手動更新を待たずに
+    /// 復帰できるようにするためで、Claude Code 経路が認証情報の入れ替わりを待つのと
+    /// 同じ形にそろえてある。読み直すだけで API は叩かない
+    /// （同じトークンなら拒否済みの門番が止める）。
+    private func invalidateLongLivedTokenCache() {
+        longLivedTokenLoaded = false
+        cachedLongLivedToken = nil
+        // プラン名はトークン（＝アカウント）に紐づくので一緒に捨てる。
+        longLivedPlanResolved = false
+        cachedLongLivedPlan = nil
     }
 
     // MARK: - Claude OAuth（読み取り専用）
@@ -185,6 +356,18 @@ final class UsageFetcher {
         // 拒否済みマークはここで外す。
         rejectedAccessTokenDigest = nil
         DebugDump.write(data: data, url: claudeOAuthUsageURL)
+        return try makeSnapshot(
+            from: data,
+            planHint: credentials.subscriptionType ?? credentials.rateLimitTier,
+            source: .claudeCode
+        )
+    }
+
+    /// レスポンスを UsageSnapshot に変換する。認証情報の出どころに依存しない部分。
+    ///
+    /// - Parameter planHint: 認証情報から分かるプラン名。長期トークンには
+    ///   付随情報が無いので nil になり、その場合はレスポンス本体から拾う。
+    private func makeSnapshot(from data: Data, planHint: String?, source: CredentialSource) throws -> UsageSnapshot {
         guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw FetchError.decodeFailed("Claude OAuth usage: not a JSON object")
         }
@@ -193,14 +376,19 @@ final class UsageFetcher {
             throw FetchError.decodeFailed("Claude OAuth usage: usage tracks not found. top-level keys=\(Array(json.keys).sorted())")
         }
         return UsageSnapshot(
-            plan: credentials.subscriptionType ?? credentials.rateLimitTier ?? extractPlan(from: json),
+            plan: planHint ?? extractPlan(from: json),
             tracks: tracks,
-            fetchedAt: Date()
+            fetchedAt: Date(),
+            source: source
         )
     }
 
     private func getOAuthUsage(accessToken: String) async throws -> Data {
-        var req = URLRequest(url: claudeOAuthUsageURL)
+        try await getOAuth(claudeOAuthUsageURL, accessToken: accessToken)
+    }
+
+    private func getOAuth(_ url: URL, accessToken: String) async throws -> Data {
+        var req = URLRequest(url: url)
         req.httpMethod = "GET"
         req.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         req.setValue("application/json", forHTTPHeaderField: "Accept")

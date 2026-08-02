@@ -30,6 +30,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     /// 失敗理由は成功するまで手放さない。
     private var lastClaudeFetchFailure: String?
     private var lastCodexFetchFailure: String?
+    /// 直近の失敗に対する復旧手順。何をすれば直るかは認証情報の出どころで変わるので、
+    /// 固定文言ではなく `FetchError.recoveryHint` から受け取って保持する。
+    private var lastClaudeRecoveryHint: String?
+    private var lastCodexRecoveryHint: String?
     /// 認証切れを検出している間は自動更新間隔を落とす。詳細は
     /// `AppConfig.authExpiredRefreshInterval` のコメントを参照。
     private var isClaudeAuthExpired = false
@@ -91,7 +95,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         let menu = NSMenu()
 
         if let snap = latest {
-            let planLabel = snap.plan.map { "Claude: \($0)" } ?? "Claude"
+            // 認証の出どころは既定（Claude Code 認証）の時は出さない。
+            // 長期トークンに切り替わっている時だけ、効いていることが分かるように添える。
+            var planLabel = snap.plan.map { "Claude: \($0)" } ?? "Claude"
+            if snap.source == .longLivedToken {
+                planLabel += " · \(snap.source.label)"
+            }
             let plan = NSMenuItem(title: planLabel, action: nil, keyEquivalent: "")
             plan.isEnabled = false
             menu.addItem(plan)
@@ -108,8 +117,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             if let staleReason = claudeStaleReason {
                 addDisabledItem(to: menu, title: "\(Self.staleMarker) Claude: 最新ではありません")
                 addDisabledItem(to: menu, title: "  \(staleReason)")
-                if isClaudeAuthExpired {
-                    addDisabledItem(to: menu, title: "  \(authRecoveryHint(service: "Claude"))")
+                if let hint = lastClaudeRecoveryHint {
+                    addDisabledItem(to: menu, title: "  \(hint)")
                 }
             }
             if let nextClaudeAutoRefreshAt {
@@ -121,8 +130,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             let item = NSMenuItem(title: "Claude: \(err)", action: nil, keyEquivalent: "")
             item.isEnabled = false
             menu.addItem(item)
-            if isClaudeAuthExpired {
-                addDisabledItem(to: menu, title: "  \(authRecoveryHint(service: "Claude"))")
+            if let hint = lastClaudeRecoveryHint {
+                addDisabledItem(to: menu, title: "  \(hint)")
             }
         } else {
             let item = NSMenuItem(title: "Claude: 取得中…", action: nil, keyEquivalent: "")
@@ -145,8 +154,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             if let staleReason = codexStaleReason {
                 addDisabledItem(to: menu, title: "\(Self.staleMarker) Codex: 最新ではありません")
                 addDisabledItem(to: menu, title: "  \(staleReason)")
-                if isCodexAuthExpired {
-                    addDisabledItem(to: menu, title: "  \(authRecoveryHint(service: "Codex"))")
+                if let hint = lastCodexRecoveryHint {
+                    addDisabledItem(to: menu, title: "  \(hint)")
                 }
             }
             if let nextCodexAutoRefreshAt {
@@ -159,8 +168,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             let item = NSMenuItem(title: "Codex: \(latestCodexError)", action: nil, keyEquivalent: "")
             item.isEnabled = false
             menu.addItem(item)
-            if isCodexAuthExpired {
-                addDisabledItem(to: menu, title: "  \(authRecoveryHint(service: "Codex"))")
+            if let hint = lastCodexRecoveryHint {
+                addDisabledItem(to: menu, title: "  \(hint)")
             }
             if let nextCodexAutoRefreshAt {
                 let next = NSMenuItem(title: "Codex 次回自動更新: \(formatTime(nextCodexAutoRefreshAt))", action: nil, keyEquivalent: "")
@@ -282,8 +291,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 + "\n更新: \(formatFetchedAt(snap.fetchedAt))"
             if let staleReason {
                 claudeTip += "\n\(Self.staleMarker) 最新ではありません: \(staleReason)"
-                if isClaudeAuthExpired {
-                    claudeTip += "\n\(authRecoveryHint(service: "Claude"))"
+                if let hint = lastClaudeRecoveryHint {
+                    claudeTip += "\n\(hint)"
                 }
             }
             let codexTip = codexToolTipPart()
@@ -410,16 +419,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         return "\(passed.joined(separator: " / ")) 枠のリセット時刻を過ぎています。表示中の残量は \(formatFetchedAt(fetchedAt)) 時点の値です。"
     }
 
-    /// 認証切れからの復帰手順。アプリ側でトークンを更新しない設計なので、
-    /// 何をすれば直るのかをここで具体的に伝える。
-    private func authRecoveryHint(service: String) -> String {
-        switch service {
-        case "Codex":
-            return "復帰方法: ターミナルで `codex login` を実行してください。"
-        default:
-            return "復帰方法: ターミナルで `claude` を起動するか `claude auth login` を実行し、トークンを更新してください。"
-        }
-    }
 
     private func codexTitlePart(includeUnavailableState: Bool = false) -> String {
         guard let codex = latestCodex, let track = codexTitleTrack(from: codex) else {
@@ -547,8 +546,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             var parts = ["Codex plan: \(codex.plan)"] + lines + ["Codex 更新: \(formatFetchedAt(codex.fetchedAt))"]
             if let staleReason = codexStaleReason {
                 parts.append("\(Self.staleMarker) 最新ではありません: \(staleReason)")
-                if isCodexAuthExpired {
-                    parts.append(authRecoveryHint(service: "Codex"))
+                if let hint = lastCodexRecoveryHint {
+                    parts.append(hint)
                 }
             }
             return parts.joined(separator: "\n")
@@ -860,6 +859,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                     self.latest = snap
                     self.latestError = nil
                     self.lastClaudeFetchFailure = nil
+                    self.lastClaudeRecoveryHint = nil
                     self.isClaudeAuthExpired = false
                     self.isLoadingClaude = false
                     self.showClaudeWeeklyLimitAlertsIfNeeded(from: snap)
@@ -872,6 +872,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                     let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
                     self.latestError = message
                     self.lastClaudeFetchFailure = message
+                    self.lastClaudeRecoveryHint = (error as? FetchError)?.recoveryHint
                     self.isClaudeAuthExpired = (error as? FetchError)?.isAuthExpired ?? false
                     self.isLoadingClaude = false
                     self.updateTitle()
@@ -905,6 +906,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                     self.latestCodex = snap
                     self.latestCodexError = nil
                     self.lastCodexFetchFailure = nil
+                    self.lastCodexRecoveryHint = nil
                     self.isCodexAuthExpired = false
                     self.isLoadingCodex = false
                     self.showWeeklyLimitAlertIfNeeded(service: "Codex", track: self.weeklyLimitTrack(from: snap))
@@ -917,6 +919,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                     let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
                     self.latestCodexError = message
                     self.lastCodexFetchFailure = message
+                    self.lastCodexRecoveryHint = (error as? FetchError)?.recoveryHint
                     self.isCodexAuthExpired = (error as? FetchError)?.isAuthExpired ?? false
                     self.isLoadingCodex = false
                     self.updateTitle()
