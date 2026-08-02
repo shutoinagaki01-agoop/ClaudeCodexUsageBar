@@ -49,19 +49,49 @@ struct UsageTrack: Equatable {
         max(0, min(100, Int((remainingFraction * 100).rounded())))
     }
 
+    /// リセット時刻を過ぎている = この枠はすでに切り替わっており、
+    /// 手元の残量は実際の値ではない。取得が止まっている時にだけ起こる。
+    var isResetPassed: Bool {
+        guard let resetsAt else { return false }
+        return resetsAt <= Date()
+    }
+
     var resetTimeString: String {
         guard let resetsAt = resetsAt else { return "--:--" }
         let f = DateFormatter()
         // 7d枠は日付が重要なので、24時間以内でも M/d HH:mm で表示する。
+        // 過去の時刻も必ず日付を付ける。"05:30" だけだと今日の予定に見えてしまう。
         if label.hasPrefix("7d") {
             f.dateFormat = "M/d HH:mm"
-        } else if abs(resetsAt.timeIntervalSinceNow) < 24 * 60 * 60 {
+        } else if DateInterval.withinNextDay.contains(resetsAt) {
             f.dateFormat = "HH:mm"
         } else {
             f.dateFormat = "M/d HH:mm"
         }
         return f.string(from: resetsAt)
     }
+}
+
+extension DateInterval {
+    /// 「今から24時間以内の未来」。時刻だけの短い表記を許してよい範囲。
+    static var withinNextDay: DateInterval {
+        DateInterval(start: Date(), duration: 24 * 60 * 60)
+    }
+}
+
+/// 鮮度判定に必要な部分だけを取り出したビュー。
+/// Claude / Codex で同じ判定を使うために挟んでいる。
+struct TrackStaleness {
+    let label: String
+    let isResetPassed: Bool
+}
+
+extension UsageTrack {
+    var staleness: TrackStaleness { TrackStaleness(label: label, isResetPassed: isResetPassed) }
+}
+
+extension CodexUsageTrack {
+    var staleness: TrackStaleness { TrackStaleness(label: label, isResetPassed: isResetPassed) }
 }
 
 /// claude.ai の現在の利用状況スナップショット。複数のトラック（5h / 7d など）を保持し、
@@ -86,12 +116,17 @@ struct CodexUsageTrack: Equatable {
         max(0, min(100, Int((remainingFraction * 100).rounded())))
     }
 
+    var isResetPassed: Bool {
+        guard let resetsAt else { return false }
+        return resetsAt <= Date()
+    }
+
     var resetTimeString: String {
         guard let resetsAt = resetsAt else { return "--:--" }
         let f = DateFormatter()
         if label.hasPrefix("7d") {
             f.dateFormat = "M/d HH:mm"
-        } else if abs(resetsAt.timeIntervalSinceNow) < 24 * 60 * 60 {
+        } else if DateInterval.withinNextDay.contains(resetsAt) {
             f.dateFormat = "HH:mm"
         } else {
             f.dateFormat = "M/d HH:mm"

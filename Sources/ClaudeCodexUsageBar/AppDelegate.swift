@@ -6,6 +6,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private var statusItem: NSStatusItem!
     private var claudeTimer: Timer?
     private var codexTimer: Timer?
+    /// 取得はせず、リセット時刻を跨いだ時に表示だけ作り直すためのタイマー。
+    private var staleDisplayTimer: Timer?
     private let fetcher = UsageFetcher()
     private let codexFetcher = CodexUsageFetcher()
     private var latest: UsageSnapshot?
@@ -17,6 +19,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private var isResettingCodexUsage = false
     private var nextClaudeAutoRefreshAt: Date?
     private var nextCodexAutoRefreshAt: Date?
+    /// 最後に「実際の取得が失敗した」理由。成功した時だけ nil に戻す。
+    ///
+    /// `latestError` とは別に持つ。`latestError` は取得開始時に消され、
+    /// 自動更新ウィンドウ外のスキップ文言も入るため、鮮度判定には使えない。
+    /// 具体的には次の 2 つで警告が消えてしまう。
+    ///   - 再取得中（`latestError = nil` の間）。失敗したままでも警告が一瞬消える
+    ///   - スリープ復帰などでウィンドウ外のスキップ経路に入った時
+    /// どちらも「直っていないのに直ったように見える」ので、
+    /// 失敗理由は成功するまで手放さない。
+    private var lastClaudeFetchFailure: String?
+    private var lastCodexFetchFailure: String?
     /// 認証切れを検出している間は自動更新間隔を落とす。詳細は
     /// `AppConfig.authExpiredRefreshInterval` のコメントを参照。
     private var isClaudeAuthExpired = false
@@ -87,9 +100,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             for t in sortedClaudeTracks(snap.tracks) {
                 addClaudeTrackItem(to: menu, track: t, selectedTrack: selectedTrack)
             }
-            let updated = NSMenuItem(title: "Claude 更新: \(formatTime(snap.fetchedAt))", action: nil, keyEquivalent: "")
+            let updated = NSMenuItem(title: "Claude 更新: \(formatFetchedAt(snap.fetchedAt))", action: nil, keyEquivalent: "")
             updated.isEnabled = false
             menu.addItem(updated)
+            // 取得が止まっていても値自体は残す方針なので、古い理由はここで必ず出す。
+            // 出さないと「更新: 02:11」だけが手掛かりになり、現在値と区別が付かない。
+            if let staleReason = claudeStaleReason {
+                addDisabledItem(to: menu, title: "\(Self.staleMarker) Claude: 最新ではありません")
+                addDisabledItem(to: menu, title: "  \(staleReason)")
+                if isClaudeAuthExpired {
+                    addDisabledItem(to: menu, title: "  \(authRecoveryHint(service: "Claude"))")
+                }
+            }
             if let nextClaudeAutoRefreshAt {
                 let next = NSMenuItem(title: "Claude 次回自動更新: \(formatTime(nextClaudeAutoRefreshAt))", action: nil, keyEquivalent: "")
                 next.isEnabled = false
@@ -99,6 +121,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             let item = NSMenuItem(title: "Claude: \(err)", action: nil, keyEquivalent: "")
             item.isEnabled = false
             menu.addItem(item)
+            if isClaudeAuthExpired {
+                addDisabledItem(to: menu, title: "  \(authRecoveryHint(service: "Claude"))")
+            }
         } else {
             let item = NSMenuItem(title: "Claude: 取得中…", action: nil, keyEquivalent: "")
             item.isEnabled = false
@@ -114,9 +139,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             for t in codex.tracks {
                 addCodexTrackItem(to: menu, track: t, selectedTrack: selectedTrack)
             }
-            let updated = NSMenuItem(title: "Codex 更新: \(formatTime(codex.fetchedAt))", action: nil, keyEquivalent: "")
+            let updated = NSMenuItem(title: "Codex 更新: \(formatFetchedAt(codex.fetchedAt))", action: nil, keyEquivalent: "")
             updated.isEnabled = false
             menu.addItem(updated)
+            if let staleReason = codexStaleReason {
+                addDisabledItem(to: menu, title: "\(Self.staleMarker) Codex: 最新ではありません")
+                addDisabledItem(to: menu, title: "  \(staleReason)")
+                if isCodexAuthExpired {
+                    addDisabledItem(to: menu, title: "  \(authRecoveryHint(service: "Codex"))")
+                }
+            }
             if let nextCodexAutoRefreshAt {
                 let next = NSMenuItem(title: "Codex 次回自動更新: \(formatTime(nextCodexAutoRefreshAt))", action: nil, keyEquivalent: "")
                 next.isEnabled = false
@@ -127,6 +159,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             let item = NSMenuItem(title: "Codex: \(latestCodexError)", action: nil, keyEquivalent: "")
             item.isEnabled = false
             menu.addItem(item)
+            if isCodexAuthExpired {
+                addDisabledItem(to: menu, title: "  \(authRecoveryHint(service: "Codex"))")
+            }
             if let nextCodexAutoRefreshAt {
                 let next = NSMenuItem(title: "Codex 次回自動更新: \(formatTime(nextCodexAutoRefreshAt))", action: nil, keyEquivalent: "")
                 next.isEnabled = false
@@ -234,15 +269,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
     private func updateTitle() {
         guard let button = statusItem.button else { return }
-        if let tracks = latest?.tracks, !tracks.isEmpty {
-            let sorted = sortedClaudeTracks(tracks)
-            let headerTrack = claudeHeaderTrack(from: tracks) ?? sorted.first!
+        if let snap = latest, !snap.tracks.isEmpty {
+            let sorted = sortedClaudeTracks(snap.tracks)
+            let headerTrack = claudeHeaderTrack(from: snap.tracks) ?? sorted.first!
             let codexPart = codexTitlePart(includeUnavailableState: true)
             let resetSuffix = headerTrack.resetsAt == nil ? "" : "·\(shortReset(headerTrack))"
-            setMenuBarTitle("\(claudeTextLabel)\(claudeTitleLabelPart(for: headerTrack)) \(headerTrack.remainingPercent)%\(resetSuffix)\(codexPart)")
-            let claudeTip = sorted.map { "\($0.label): 残り \($0.remainingPercent)%, リセット \($0.resetTimeString)" }
+            let staleReason = claudeStaleReason
+            let staleMark = staleReason == nil ? "" : "\(Self.staleMarker) "
+            setMenuBarTitle("\(claudeTextLabel)\(claudeTitleLabelPart(for: headerTrack)) \(staleMark)\(headerTrack.remainingPercent)%\(resetSuffix)\(codexPart)")
+            var claudeTip = sorted.map { "\($0.label): 残り \($0.remainingPercent)%, リセット \($0.resetTimeString)" }
                 .joined(separator: "\n")
-                + "\n更新: \(formatTime(latest!.fetchedAt))"
+                + "\n更新: \(formatFetchedAt(snap.fetchedAt))"
+            if let staleReason {
+                claudeTip += "\n\(Self.staleMarker) 最新ではありません: \(staleReason)"
+                if isClaudeAuthExpired {
+                    claudeTip += "\n\(authRecoveryHint(service: "Claude"))"
+                }
+            }
             let codexTip = codexToolTipPart()
             button.toolTip = codexTip.isEmpty ? claudeTip : "\(claudeTip)\n\n\(codexTip)"
         } else if latestError != nil {
@@ -327,6 +370,57 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         track.label.hasPrefix("7d") ? " \(track.label)" : ""
     }
 
+    // MARK: - 表示中データの鮮度
+
+    /// メニューバーに付ける「この値は現在値ではない」マーカー。
+    /// `iconMenuBarTitle` が先頭の "Claude" をアイコンに差し替えるため、
+    /// マーカーはラベルの前ではなく後ろに置く。
+    private static let staleMarker = "⚠︎"
+
+    /// 表示中の Claude スナップショットが古い理由。古くなければ nil。
+    ///
+    /// 判定は 2 つ。
+    ///   1. 直近の取得が失敗したまま。認証切れ中はここが永続的に立つ。
+    ///   2. どれかの枠がリセット時刻を過ぎている。枠が切り替わった後なので、
+    ///      手元の残量は取得時点の値でしかない。
+    ///
+    /// 2 について、枠を 5h に限定しない。同一スナップショット内では 5h の
+    /// リセットが常に最初に来るので 5h だけ見ても大抵は足りるが、
+    /// アカウントによっては `five_hour` が返らない（`extractTracks` は
+    /// 存在する枠だけ拾う）。その場合に判定が丸ごと効かなくなるのを避ける。
+    ///
+    /// 古くても値は消さない。直前の残量は手掛かりとして残しつつ、
+    /// 現在値と誤読されないようにマーカーと理由を添える方針を採る。
+    private var claudeStaleReason: String? {
+        guard let latest else { return nil }
+        return staleReason(fetchFailure: lastClaudeFetchFailure, tracks: latest.tracks.map(\.staleness), fetchedAt: latest.fetchedAt)
+    }
+
+    private var codexStaleReason: String? {
+        guard let latestCodex else { return nil }
+        return staleReason(fetchFailure: lastCodexFetchFailure, tracks: latestCodex.tracks.map(\.staleness), fetchedAt: latestCodex.fetchedAt)
+    }
+
+    private func staleReason(fetchFailure: String?, tracks: [TrackStaleness], fetchedAt: Date) -> String? {
+        if let fetchFailure {
+            return fetchFailure
+        }
+        let passed = tracks.filter(\.isResetPassed).map(\.label)
+        guard !passed.isEmpty else { return nil }
+        return "\(passed.joined(separator: " / ")) 枠のリセット時刻を過ぎています。表示中の残量は \(formatFetchedAt(fetchedAt)) 時点の値です。"
+    }
+
+    /// 認証切れからの復帰手順。アプリ側でトークンを更新しない設計なので、
+    /// 何をすれば直るのかをここで具体的に伝える。
+    private func authRecoveryHint(service: String) -> String {
+        switch service {
+        case "Codex":
+            return "復帰方法: ターミナルで `codex login` を実行してください。"
+        default:
+            return "復帰方法: ターミナルで `claude` を起動するか `claude auth login` を実行し、トークンを更新してください。"
+        }
+    }
+
     private func codexTitlePart(includeUnavailableState: Bool = false) -> String {
         guard let codex = latestCodex, let track = codexTitleTrack(from: codex) else {
             guard includeUnavailableState else { return "" }
@@ -339,7 +433,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             return ""
         }
         let label = track.label == "5h" ? "" : " \(track.label)"
-        return " | \(codexTextLabel)\(label) \(track.remainingPercent)%·\(shortReset(track))"
+        let staleMark = codexStaleReason == nil ? "" : "\(Self.staleMarker) "
+        return " | \(codexTextLabel)\(label) \(staleMark)\(track.remainingPercent)%·\(shortReset(track))"
     }
 
     private func codexTitleTrack(from snapshot: CodexUsageSnapshot) -> CodexUsageTrack? {
@@ -449,8 +544,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             let lines = codex.tracks.map {
                 "Codex \($0.label): 残り \($0.remainingPercent)%, リセット \($0.resetTimeString)"
             }
-            return (["Codex plan: \(codex.plan)"] + lines + ["Codex 更新: \(formatTime(codex.fetchedAt))"])
-                .joined(separator: "\n")
+            var parts = ["Codex plan: \(codex.plan)"] + lines + ["Codex 更新: \(formatFetchedAt(codex.fetchedAt))"]
+            if let staleReason = codexStaleReason {
+                parts.append("\(Self.staleMarker) 最新ではありません: \(staleReason)")
+                if isCodexAuthExpired {
+                    parts.append(authRecoveryHint(service: "Codex"))
+                }
+            }
+            return parts.joined(separator: "\n")
         }
         if let latestCodexError {
             return "Codex: \(latestCodexError)"
@@ -459,31 +560,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     }
 
     /// メニューバー用の短いリセット表記。
-    /// 24h 以内なら "HH:mm"、それ以上先なら "M/d" だけ（時刻はドロップダウン側で見せる）。
+    /// 24h 以内の未来なら "HH:mm"、それ以外（先の日付・過去）は "M/d" だけ
+    /// （時刻はドロップダウン側で見せる）。
+    ///
+    /// 過去の時刻に "HH:mm" を使わないのが要点。取得が止まって古い枠を表示している時、
+    /// "05:30" だけだと今日これからリセットされるように読めてしまう。
     private func shortReset(_ t: UsageTrack) -> String {
-        guard let d = t.resetsAt else { return "--" }
-        let f = DateFormatter()
-        if abs(d.timeIntervalSinceNow) < 24 * 60 * 60 {
-            f.dateFormat = "HH:mm"
-        } else {
-            f.dateFormat = "M/d"
-        }
-        return f.string(from: d)
+        shortReset(t.resetsAt)
     }
 
     private func shortReset(_ t: CodexUsageTrack) -> String {
-        guard let d = t.resetsAt else { return "--" }
+        shortReset(t.resetsAt)
+    }
+
+    private func shortReset(_ date: Date?) -> String {
+        guard let date else { return "--" }
         let f = DateFormatter()
-        if abs(d.timeIntervalSinceNow) < 24 * 60 * 60 {
-            f.dateFormat = "HH:mm"
-        } else {
-            f.dateFormat = "M/d"
-        }
-        return f.string(from: d)
+        f.dateFormat = DateInterval.withinNextDay.contains(date) ? "HH:mm" : "M/d"
+        return f.string(from: date)
     }
 
     private func formatTime(_ d: Date) -> String {
         let f = DateFormatter(); f.dateFormat = "HH:mm:ss"; return f.string(from: d)
+    }
+
+    /// 取得時刻の表記。今日でなければ日付を足す。
+    ///
+    /// "更新: 02:11:07" だけだと 36 時間前のスナップショットでも今日の 02:11 に見える。
+    /// 古さが一目で分かるように、日付が変わっていれば "8/1 02:11:07" にする。
+    private func formatFetchedAt(_ d: Date) -> String {
+        let f = DateFormatter()
+        f.dateFormat = Calendar.current.isDateInToday(d) ? "HH:mm:ss" : "M/d HH:mm:ss"
+        return f.string(from: d)
     }
 
     private func formatMonthDayTime(_ d: Date) -> String {
@@ -522,8 +630,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     @objc private func workspaceWillSleep() {
         claudeTimer?.invalidate()
         codexTimer?.invalidate()
+        staleDisplayTimer?.invalidate()
         claudeTimer = nil
         codexTimer = nil
+        staleDisplayTimer = nil
         nextClaudeAutoRefreshAt = nil
         nextCodexAutoRefreshAt = nil
     }
@@ -537,6 +647,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         } else {
             scheduleNextClaudeAutoRefresh()
             scheduleNextCodexAutoRefresh()
+            // スリープ中にリセットを跨いでいることがある。取得はできないが、
+            // メニューバー側にも鮮度マーカーを反映させる必要がある。
+            updateTitle()
             rebuildMenu()
         }
     }
@@ -724,6 +837,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private func refreshClaude(isAutomatic: Bool = false, forceRejectedTokenRetry: Bool = false) {
         if isAutomatic && !isInAutoRefreshWindow() {
             latestError = "自動更新は JST \(config.autoRefreshWindowLabel) のみ"
+            // 仕様通りの休止であって取得ではない。`lastClaudeFetchFailure` は
+            // 触らない。触ると、失敗した後にスリープ復帰などでこの経路へ入った時に
+            // 直っていない失敗の警告が消える。
             isLoadingClaude = false
             updateTitle()
             scheduleNextClaudeAutoRefresh()
@@ -743,6 +859,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 await MainActor.run {
                     self.latest = snap
                     self.latestError = nil
+                    self.lastClaudeFetchFailure = nil
                     self.isClaudeAuthExpired = false
                     self.isLoadingClaude = false
                     self.showClaudeWeeklyLimitAlertsIfNeeded(from: snap)
@@ -752,7 +869,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 }
             } catch {
                 await MainActor.run {
-                    self.latestError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                    let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                    self.latestError = message
+                    self.lastClaudeFetchFailure = message
                     self.isClaudeAuthExpired = (error as? FetchError)?.isAuthExpired ?? false
                     self.isLoadingClaude = false
                     self.updateTitle()
@@ -785,6 +904,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 await MainActor.run {
                     self.latestCodex = snap
                     self.latestCodexError = nil
+                    self.lastCodexFetchFailure = nil
                     self.isCodexAuthExpired = false
                     self.isLoadingCodex = false
                     self.showWeeklyLimitAlertIfNeeded(service: "Codex", track: self.weeklyLimitTrack(from: snap))
@@ -794,7 +914,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 }
             } catch {
                 await MainActor.run {
-                    self.latestCodexError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                    let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                    self.latestCodexError = message
+                    self.lastCodexFetchFailure = message
                     self.isCodexAuthExpired = (error as? FetchError)?.isAuthExpired ?? false
                     self.isLoadingCodex = false
                     self.updateTitle()
@@ -820,6 +942,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         nextClaudeAutoRefreshAt = next
         claudeTimer = Timer(fireAt: next, interval: 0, target: self, selector: #selector(claudeAutoRefreshTimerFired), userInfo: nil, repeats: false)
         RunLoop.main.add(claudeTimer!, forMode: .common)
+        // スナップショットが差し替わった可能性があるので、鮮度タイマーも組み直す。
+        // 取得の成否に関わらずここを通るため、6 箇所の呼び出し元を個別に触らずに済む。
+        scheduleStaleDisplayCheck()
     }
 
     private func scheduleNextCodexAutoRefresh() {
@@ -837,6 +962,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         nextCodexAutoRefreshAt = next
         codexTimer = Timer(fireAt: next, interval: 0, target: self, selector: #selector(codexAutoRefreshTimerFired), userInfo: nil, repeats: false)
         RunLoop.main.add(codexTimer!, forMode: .common)
+        scheduleStaleDisplayCheck()
+    }
+
+    /// 次にどれかの枠がリセットを跨ぐ時刻に、取得なしで表示だけ作り直すタイマー。
+    ///
+    /// 鮮度判定の「リセット時刻を過ぎた」は現在時刻に依存するので、
+    /// 誰かが再描画しない限り古い残量が警告なしのまま残る。
+    /// 自動更新ウィンドウ外では次の取得が翌朝まで無いため、
+    /// 取得タイマーだけに任せると誤表示が最長で一晩続く。
+    private func scheduleStaleDisplayCheck() {
+        staleDisplayTimer?.invalidate()
+        staleDisplayTimer = nil
+
+        let resets = (latest?.tracks.compactMap(\.resetsAt) ?? [])
+            + (latestCodex?.tracks.compactMap(\.resetsAt) ?? [])
+        // まだ来ていないリセットのうち一番早いもの。
+        // 過ぎたものは既に `staleReason` が拾っているので対象外。
+        guard let next = resets.filter({ $0 > Date() }).min() else { return }
+
+        // 境界ちょうどに起こすと `isResetPassed`（<=）の評価が競るので少し後ろへ倒す。
+        let timer = Timer(
+            fireAt: next.addingTimeInterval(1),
+            interval: 0,
+            target: self,
+            selector: #selector(staleDisplayTimerFired),
+            userInfo: nil,
+            repeats: false
+        )
+        RunLoop.main.add(timer, forMode: .common)
+        staleDisplayTimer = timer
+    }
+
+    /// 取得はしない。時刻が進んだことによる表示の作り直しだけを行う。
+    @objc private func staleDisplayTimerFired() {
+        updateTitle()
+        rebuildMenu()
+        scheduleStaleDisplayCheck()
     }
 
     @objc private func claudeAutoRefreshTimerFired() {
