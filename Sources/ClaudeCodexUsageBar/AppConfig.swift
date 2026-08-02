@@ -16,19 +16,20 @@ struct AppConfig {
     let peakRefreshEndMinute: Int
     let autoRefreshTimeZone: TimeZone
     let menuBarUsesIcons: Bool
+    /// 認証切れ時に、定期更新から公式 Claude CLI を PTY 起動してよいか。
+    /// 手動更新はこの設定にかかわらずユーザ操作として許可される。
+    let allowBackgroundClaudeAuthRefresh: Bool
     let selectedClaudeMenuBarTrackLabel: String?
     let selectedCodexMenuBarTrackLabel: String?
 
     /// 認証切れを検出している間の自動更新間隔。
     ///
-    /// この状態ではアプリ側から復帰させる手段が無い（自前リフレッシュはしない）ので、
-    /// 通常の 3〜5 分間隔は続けない。
+    /// 通常の 3〜5 分間隔は続けない。バックグラウンド CLI 更新が許可されていれば、
+    /// このタイミングで公式 Claude CLI に更新を委譲する。
     ///
-    /// この間隔で行うのはキーチェーン / `auth.json` の読み直しだけで、API は叩かない。
-    /// 各 fetcher が拒否済みアクセストークンのダイジェストを覚えており、
-    /// 認証情報が入れ替わるまで API 呼び出しを打ち切るため。
-    /// したがって極端に長くしても通信量は変わらず、Claude Code / Codex CLI 側が
-    /// 更新済みでも表示が古いままになる時間が伸びるだけになる。
+    /// Claude は許可設定がオフなら認証情報の読み直しだけ、オンなら公式 CLI への委譲も行う。
+    /// Codex は `auth.json` の読み直しだけを行う。各 fetcher は拒否済みトークンを覚え、
+    /// 同じ認証情報のまま Usage API を繰り返し呼ばない。
     /// その折り合いとして 10 分を採る。手動更新はこの間隔を待たずに実行できる。
     static let authExpiredRefreshInterval: TimeInterval = 10 * 60
 
@@ -49,6 +50,10 @@ struct AppConfig {
             peakRefreshEndMinute: defaults.integer(forKey: Keys.peakRefreshEndMinute, default: 0),
             autoRefreshTimeZone: TimeZone(identifier: "Asia/Tokyo")!,
             menuBarUsesIcons: defaults.bool(forKey: Keys.menuBarUsesIcons, default: true),
+            allowBackgroundClaudeAuthRefresh: defaults.bool(
+                forKey: Keys.allowBackgroundClaudeAuthRefresh,
+                default: false
+            ),
             selectedClaudeMenuBarTrackLabel: defaults.string(forKey: Keys.selectedClaudeMenuBarTrackLabel),
             selectedCodexMenuBarTrackLabel: defaults.string(forKey: Keys.selectedCodexMenuBarTrackLabel)
         )
@@ -67,6 +72,7 @@ struct AppConfig {
         defaults.set(peakRefreshEndHour, forKey: Keys.peakRefreshEndHour)
         defaults.set(peakRefreshEndMinute, forKey: Keys.peakRefreshEndMinute)
         defaults.set(menuBarUsesIcons, forKey: Keys.menuBarUsesIcons)
+        defaults.set(allowBackgroundClaudeAuthRefresh, forKey: Keys.allowBackgroundClaudeAuthRefresh)
         saveOptional(selectedClaudeMenuBarTrackLabel, key: Keys.selectedClaudeMenuBarTrackLabel, defaults: defaults)
         saveOptional(selectedCodexMenuBarTrackLabel, key: Keys.selectedCodexMenuBarTrackLabel, defaults: defaults)
     }
@@ -87,6 +93,7 @@ struct AppConfig {
             peakRefreshEndMinute: peakRefreshEndMinute,
             autoRefreshTimeZone: autoRefreshTimeZone,
             menuBarUsesIcons: enabled,
+            allowBackgroundClaudeAuthRefresh: allowBackgroundClaudeAuthRefresh,
             selectedClaudeMenuBarTrackLabel: selectedClaudeMenuBarTrackLabel,
             selectedCodexMenuBarTrackLabel: selectedCodexMenuBarTrackLabel
         )
@@ -108,6 +115,7 @@ struct AppConfig {
             peakRefreshEndMinute: peakRefreshEndMinute,
             autoRefreshTimeZone: autoRefreshTimeZone,
             menuBarUsesIcons: menuBarUsesIcons,
+            allowBackgroundClaudeAuthRefresh: allowBackgroundClaudeAuthRefresh,
             selectedClaudeMenuBarTrackLabel: label,
             selectedCodexMenuBarTrackLabel: selectedCodexMenuBarTrackLabel
         )
@@ -129,8 +137,31 @@ struct AppConfig {
             peakRefreshEndMinute: peakRefreshEndMinute,
             autoRefreshTimeZone: autoRefreshTimeZone,
             menuBarUsesIcons: menuBarUsesIcons,
+            allowBackgroundClaudeAuthRefresh: allowBackgroundClaudeAuthRefresh,
             selectedClaudeMenuBarTrackLabel: selectedClaudeMenuBarTrackLabel,
             selectedCodexMenuBarTrackLabel: label
+        )
+    }
+
+    func withAllowBackgroundClaudeAuthRefresh(_ enabled: Bool) -> AppConfig {
+        AppConfig(
+            peakRefreshInterval: peakRefreshInterval,
+            normalRefreshInterval: normalRefreshInterval,
+            depletedFallbackRefreshInterval: depletedFallbackRefreshInterval,
+            resetRefreshBuffer: resetRefreshBuffer,
+            autoRefreshStartHour: autoRefreshStartHour,
+            autoRefreshStartMinute: autoRefreshStartMinute,
+            autoRefreshEndHour: autoRefreshEndHour,
+            autoRefreshEndMinute: autoRefreshEndMinute,
+            peakRefreshStartHour: peakRefreshStartHour,
+            peakRefreshStartMinute: peakRefreshStartMinute,
+            peakRefreshEndHour: peakRefreshEndHour,
+            peakRefreshEndMinute: peakRefreshEndMinute,
+            autoRefreshTimeZone: autoRefreshTimeZone,
+            menuBarUsesIcons: menuBarUsesIcons,
+            allowBackgroundClaudeAuthRefresh: enabled,
+            selectedClaudeMenuBarTrackLabel: selectedClaudeMenuBarTrackLabel,
+            selectedCodexMenuBarTrackLabel: selectedCodexMenuBarTrackLabel
         )
     }
 
@@ -162,6 +193,7 @@ struct AppConfig {
         static let peakRefreshEndHour = "settings.peakRefreshEndHour"
         static let peakRefreshEndMinute = "settings.peakRefreshEndMinute"
         static let menuBarUsesIcons = "settings.menuBarUsesIcons"
+        static let allowBackgroundClaudeAuthRefresh = "settings.allowBackgroundClaudeAuthRefresh"
         static let selectedClaudeMenuBarTrackLabel = "settings.selectedClaudeMenuBarTrackLabel"
         static let selectedCodexMenuBarTrackLabel = "settings.selectedCodexMenuBarTrackLabel"
     }

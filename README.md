@@ -15,10 +15,10 @@ macOS のメニューバーに **Claude** と **Codex** の残り使用量と次
 
 - macOS 12 (Monterey) 以降
 - Xcode Command Line Tools (`xcode-select --install`) もしくは Xcode 本体
-- Claude 機能を使う場合: Claude Code / Claude CLI でログイン済み
+- Claude 機能を使う場合: Claude Code / Claude CLI でログインし、CLI の初回セットアップを完了済み
 - Codex 機能を使う場合: Codex CLI でログイン済み
 
-なお本アプリはアクセストークンの更新を行わないため、CLI 側を時々起動しておく必要があります。Claude については、これを回避する [長期トークン](#長期トークンを使う-claude-のみ) の設定も用意しています。詳細は [認証情報の扱い](#認証情報の扱い) を参照してください。
+Claude の認証が切れた場合、本アプリは公式 Claude CLI に認証更新を委譲できます。アプリ自身がリフレッシュトークンや長期トークンを保持することはありません。詳細は [認証情報の扱い](#認証情報の扱い) を参照してください。
 
 ## 事前準備
 Claude, Codex が保存する OAuth 認証情報を利用するため、以下のコマンドで事前にログインしてください。
@@ -28,7 +28,12 @@ Claude, Codex が保存する OAuth 認証情報を利用するため、以下�
 ```bash
 # Claude CLI 側でログイン
 claude auth login
+
+# CLI を初めて使う環境では一度だけ対話起動し、表示される初回設定を完了
+claude
 ```
+
+`claude auth login` が済んでいても、テーマやログイン方法などを選ぶ CLI 自身の初回セットアップが残っている場合があります。本アプリはこの画面を自動操作しません。ターミナルで一度完了すればよく、アクセストークンが切れるたびに `claude` を手動起動する必要はありません。
 
 2. Codex の認証
 
@@ -39,49 +44,40 @@ codex login
 
 ## 認証情報の扱い
 
-本アプリは Claude Code / Codex CLI が保存した OAuth 認証情報を **読むだけ** です。書き込みも更新も行いません。
+本アプリ自身は Claude Code / Codex CLI が保存した OAuth 認証情報を **読むだけ** です。書き込みも、リフレッシュトークンを使った直接更新も行いません。
 
 | サービス | 読み取り元 | 方法 |
 |---|---|---|
-| Claude | 長期トークン（後述）→ `~/.claude/.credentials.json` → Keychain の `Claude Code-credentials` | `/usr/bin/security` をサブプロセスとして実行 |
+| Claude | `~/.claude/.credentials.json`、無ければ Keychain の `Claude Code-credentials` | `/usr/bin/security` をサブプロセスとして実行 |
 | Codex | `~/.codex/auth.json` | ファイル読み取り |
 
-アクセストークンの更新は Claude Code / Codex CLI に任せています。第三者アプリがリフレッシュトークンを使うと、サーバ側でトークンがローテーションされた際に CLI 側に古いトークンが残り、**CLI をログアウトさせてしまう**ためです。
+アクセストークンの更新は Claude Code / Codex CLI に任せています。第三者アプリがリフレッシュトークンを直接使うと、サーバ側でトークンがローテーションされた際に CLI 側に古いトークンが残り、**CLI をログアウトさせてしまう**ためです。
 
-この設計上の帰結として、**Claude Code / Codex CLI を長時間起動していないとアクセストークンが更新されず、使用量を表示できません**。Claude のアクセストークンの寿命は **8 時間** なので、夜間放置すると翌朝は失効した状態から始まります。その場合はメニューバーに `⚠︎` が付き、次のように表示されます。
+Claude のアクセストークンが期限切れ、または Usage API から HTTP 401 を返された場合は、次の手順で復旧します。
 
-- `Claude auth expired. Start Claude Code, or run claude auth login.`
-- `Codex auth expired. Run codex login again.`
+1. Claude 所有の設定を読み、CLI の初回セットアップが完了済みか確認
+2. 公式 `claude` コマンドを PTY（疑似端末）上で起動
+3. 起動出力を確認し、初回設定・再ログイン・その他の対話要求なら入力せず停止
+4. 通常画面に `/status` を 1 回だけ送信し、Claude Code 自身に通常の OAuth 更新を行わせる
+5. 認証情報が実際に変わったことを最大 2 秒待って確認
+6. 新しい認証情報で Usage API を 1 回だけ再試行
 
-Claude Code / Codex CLI を起動すればトークンが更新され、次の自動更新（認証切れ中は 10 分間隔）で自動的に復帰します。⌘R を押せばその場で再試行します。
+初回セットアップが未完了、または設定ファイルを安全に判定できない場合、CLI は起動せず復旧手順を表示します。事前判定を通過した後でも、初回セットアップ画面、再ログイン画面、意味を安全に確定できない対話画面を検知した場合は、キーを送らず直ちに停止します。タイマーによる Enter 連打や、汎用的な `Press Enter to continue` への自動応答は行いません。本アプリのキー入力によってテーマやログイン方法を選んだり、OAuth ブラウザ認証へ進めたりすることはありません。
 
-### 長期トークンを使う (Claude のみ)
+`⌘R` の手動更新では、この委譲を常に許可します。無操作のまま自動復旧させたい場合は、メニューの **詳細設定 > Claude認証をバックグラウンドで更新** をオンにしてください。この設定は、バックグラウンドで CLI が起動して Keychain の確認画面を出す可能性があるため、既定ではオフです。
 
-`claude setup-token` が発行する **1 年有効の OAuth トークン** を本アプリに持たせると、上記の 8 時間問題を回避できます。Claude Code の起動状況から独立するため、8 時間ごとの更新は不要で、通常は最大 1 年間利用できます。ただし、途中で取り消された場合は再発行が必要です。
+同時に複数の更新が走っても CLI は 1 回だけ起動します。成功後は 5 分、失敗後は 20 秒のクールダウンを設けています。CLI 起動後に認証情報が変わらなければ成功扱いにはしません。
 
-```bash
-# 1. トークンを発行（ブラウザ認証が開きます）
-claude setup-token
+CLI 実行後の更新待ちは、`~/.claude/.credentials.json` のファイル属性、または Keychain の復号を伴わない `mdat` メタデータだけを監視します。変更を検出した時だけ認証情報を 1 回復号するため、200ms ごとに Keychain のパスワード値を読み直すことはありません。また、PTY 出力は 1 回 64KB・累積 1MB に制限しています。
 
-# 2. 表示されたトークンをキーチェーンに保存
-#    -w を値なしで渡すと伏せ字入力になり、シェル履歴に残りません
-security add-generic-password -U \
-  -s "com.example.ClaudeCodexUsageBar" \
-  -a "claude.oauth.longLivedToken" -w
-```
+Codex は従来どおり直接更新せず、Codex CLI が更新した `~/.codex/auth.json` を読み直します。認証切れ時はメニューバーに `⚠︎` と復旧手順を表示します。
 
-保存後、メニューの「Claude/Codexの残量を手動で更新」を実行してください。メニュー先頭が `Claude · 長期トークン` になれば有効です。
-
-やめる場合は項目を削除し、メニューの「Claude/Codexの残量を手動で更新」を実行するか、アプリを再起動してください。Claude Code 認証へ戻ります。
+以前のバージョンで長期トークンを保存していた場合、現バージョンはその項目を読みません。不要なトークンは次のコマンドで削除できます。
 
 ```bash
 security delete-generic-password \
   -s "com.example.ClaudeCodexUsageBar" -a "claude.oauth.longLivedToken"
 ```
-
-補足として、この経路でもトークンは **読むだけ** です。発行も保存も更新も行いません。トークンが拒否された場合は理由（401 かスコープ不足か）を表示し、以後は入れ替えられるまで API を呼びません。トークンを入れ替えれば、手動更新を待たずに次の自動更新で復帰します。
-
-プラン名は長期トークンには付随しないため、`/api/oauth/profile` から 1 回だけ引いて保持します（トークンが入れ替わるまで再取得しません）。この問い合わせが失敗しても利用量の表示は妨げず、プラン名の表示だけが省略されます。
 
 ## アプリの起動
 
@@ -100,7 +96,7 @@ open build/ClaudeCodexUsageBar.app
 | 通常時の自動更新間隔 | **JST 11:00–16:00 は 3 分、それ以外は 5 分** | 5h / 7d 枠ともに残量がある間 |
 | 自動更新の時間帯 | **JST 09:30–21:00** | 深夜〜朝はサーバー負荷とレートリミットを避けるため停止 |
 | 5h 枯渇時 | **次のリセット時刻まで待機**（取れない場合 1 時間後にリトライ） | 0% に張り付いている間に無駄打ちしない |
-| 認証切れ時 | **10 分間隔** | API は呼ばず、認証情報の読み直しだけ行う。CLI 側がトークンを更新したら自動復帰 |
+| 認証切れ時 | **10 分間隔** | 同じ失効トークンでは API を呼ばない。Claude は設定がオンなら公式 CLI に更新を委譲し、Codex は認証情報を読み直す |
 | 時間帯外 | メニューバーに「自動更新は JST 09:30-21:00 のみ」と表示 | 手動更新（⌘R）はいつでも可能 |
 
 ### 取得間隔・時刻を変更したい場合
@@ -149,8 +145,9 @@ Codex 更新: 14:21:08
 
 | 項目 | 動作 |
 |---|---|
-| Claude/Codexの残量を手動で更新 | 即座に両方を再取得 (`⌘R`)。認証切れで自動更新が通信を止めている場合も、認証情報を読み直して 1 回だけ強制的に再試行する |
+| Claude/Codexの残量を手動で更新 | 即座に両方を再取得 (`⌘R`)。Claude 認証切れ時は公式 CLI の PTY 更新も実行する |
 | Codex 使用量をリセット: 残りN回 | 確認後、Codex のリセット可能回数を1回消費して使用量をリセット。残り0回の場合は押せません |
+| 詳細設定 > Claude認証をバックグラウンドで更新 | 認証切れ時の自動更新で公式 Claude CLI を PTY 起動する（既定はオフ） |
 | 詳細設定 > 時間設定を変更… | 起動時間、ピーク時間、更新間隔を変更 |
 | 終了 | アプリ停止 (`⌘Q`) |
 
@@ -181,7 +178,11 @@ security set-generic-password-partition-list -S apple-tool:,apple: -s "Claude Co
 | 症状 | 対処 |
 |---|---|
 | `Claude auth not found. Run claude auth login first.` | `claude auth login` を実行する |
-| `Claude auth expired. Start Claude Code, or run claude auth login.` | Claude Code を起動する（アクセストークンが更新される）。それでも直らなければ `claude auth login` を再実行 |
+| `Claude CLI setup required. Run claude once in Terminal and complete the setup.` | ターミナルで `claude` を一度起動し、テーマやログイン方法などの初回設定を完了する。完了後は毎回の手動起動は不要 |
+| `Claude login required. Run claude auth login in Terminal.` | refresh token の失効・取り消しなどで再ログインが必要。ターミナルで `claude auth login` を実行する。本アプリはブラウザ認証を自動開始しない |
+| `Claude CLI needs interactive attention. ...` | ターミナルで `claude` を起動し、表示された案内を確認する。本アプリは内容を推測して Enter を送らない |
+| `Claude auth expired. Use manual refresh, or run claude auth login.` | `⌘R` で公式 CLI への更新委譲を実行する。自動化する場合は詳細設定をオン。それでも直らなければ `claude auth login` |
+| `Claude CLI auth refresh failed: ...` | ターミナルで `claude` が起動できるか確認し、直らなければ `claude auth login` |
 | `Codex auth expired. Run codex login again.` | `codex login` を再実行する |
 | 「Codex auth not found」 | `codex login` を実行して `~/.codex/auth.json` を作る |
 | `Auth rejected (HTTP 401).` | 通常は表示されない内部エラー。出た場合は不具合として報告してください |

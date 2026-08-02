@@ -95,12 +95,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         let menu = NSMenu()
 
         if let snap = latest {
-            // 認証の出どころは既定（Claude Code 認証）の時は出さない。
-            // 長期トークンに切り替わっている時だけ、効いていることが分かるように添える。
-            var planLabel = snap.plan.map { "Claude: \($0)" } ?? "Claude"
-            if snap.source == .longLivedToken {
-                planLabel += " · \(snap.source.label)"
-            }
+            let planLabel = snap.plan.map { "Claude: \($0)" } ?? "Claude"
             let plan = NSMenuItem(title: planLabel, action: nil, keyEquivalent: "")
             plan.isEnabled = false
             menu.addItem(plan)
@@ -259,6 +254,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         iconDisplay.target = self
         iconDisplay.state = config.menuBarUsesIcons ? .on : .off
         submenu.addItem(iconDisplay)
+        let backgroundClaudeAuth = NSMenuItem(
+            title: "Claude認証をバックグラウンドで更新",
+            action: #selector(toggleBackgroundClaudeAuthRefreshAction),
+            keyEquivalent: ""
+        )
+        backgroundClaudeAuth.target = self
+        backgroundClaudeAuth.state = config.allowBackgroundClaudeAuthRefresh ? .on : .off
+        backgroundClaudeAuth.toolTip = "認証切れ時に公式Claude CLIをPTY起動します。Keychainの確認が表示される場合があります。"
+        submenu.addItem(backgroundClaudeAuth)
         submenu.addItem(.separator())
         addDataSubmenu(to: submenu)
         submenu.addItem(.separator())
@@ -664,6 +668,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         rebuildMenu()
     }
 
+    @objc private func toggleBackgroundClaudeAuthRefreshAction() {
+        let enabled = !config.allowBackgroundClaudeAuthRefresh
+        config = config.withAllowBackgroundClaudeAuthRefresh(enabled)
+        config.save()
+        if enabled, isClaudeAuthExpired, isInAutoRefreshWindow() {
+            refreshClaude(isAutomatic: true)
+        } else {
+            rebuildMenu()
+        }
+    }
+
     @objc private func resetCodexUsageAction() {
         let count = latestCodex?.rateLimitResetCreditsAvailable ?? 0
         guard count > 0 else { return }
@@ -780,6 +795,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 peakRefreshEndMinute: peakEndTime.minute,
                 autoRefreshTimeZone: config.autoRefreshTimeZone,
                 menuBarUsesIcons: config.menuBarUsesIcons,
+                allowBackgroundClaudeAuthRefresh: config.allowBackgroundClaudeAuthRefresh,
                 selectedClaudeMenuBarTrackLabel: config.selectedClaudeMenuBarTrackLabel,
                 selectedCodexMenuBarTrackLabel: config.selectedCodexMenuBarTrackLabel
             )
@@ -851,10 +867,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         updateTitle()
         rebuildMenu()
 
+        let authRefreshInteraction: ClaudeAuthRefreshInteraction = forceRejectedTokenRetry
+            ? .userInitiated
+            : (config.allowBackgroundClaudeAuthRefresh ? .background : .disabled)
+
         Task { [weak self] in
             guard let self = self else { return }
             do {
-                let snap = try await self.fetcher.fetchUsage(forceRejectedTokenRetry: forceRejectedTokenRetry)
+                let snap = try await self.fetcher.fetchUsage(
+                    forceRejectedTokenRetry: forceRejectedTokenRetry,
+                    authRefreshInteraction: authRefreshInteraction
+                )
                 await MainActor.run {
                     self.latest = snap
                     self.latestError = nil

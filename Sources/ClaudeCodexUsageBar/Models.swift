@@ -19,7 +19,7 @@ enum TokenDigest {
 /// このアプリは認証情報を **読むだけ** で、更新も保存も行わない。
 /// そのため `refreshToken` は保持しない（持つと事故の余地しか無い）。
 /// トークンのリフレッシュは Claude Code 本体の責務である。
-struct ClaudeOAuthCredentials: Equatable {
+struct ClaudeOAuthCredentials: Equatable, Sendable {
     let accessToken: String
     let expiresAt: Date?
     let scopes: [String]
@@ -94,32 +94,12 @@ extension CodexUsageTrack {
     var staleness: TrackStaleness { TrackStaleness(label: label, isResetPassed: isResetPassed) }
 }
 
-/// 利用量の取得に使った認証情報の出どころ。
-///
-/// 表示のためだけでなく、失敗時の復旧手順が出どころで変わるので区別する。
-enum CredentialSource: Equatable {
-    /// Claude Code が管理する OAuth 認証情報（Keychain / `.credentials.json`）。
-    /// アクセストークンの寿命が 8 時間しかなく、更新は Claude Code 任せになる。
-    case claudeCode
-    /// `claude setup-token` が発行する 1 年トークンを、このアプリ自身が保持しているもの。
-    /// Claude Code の起動状況から独立するため、放置しても失効しない。
-    case longLivedToken
-
-    var label: String {
-        switch self {
-        case .claudeCode: return "Claude Code 認証"
-        case .longLivedToken: return "長期トークン"
-        }
-    }
-}
-
 /// claude.ai の現在の利用状況スナップショット。複数のトラック（5h / 7d など）を保持し、
 /// メニューバーには代表トラック（primary）を表示する。
 struct UsageSnapshot: Equatable {
     let plan: String?
     let tracks: [UsageTrack]
     let fetchedAt: Date
-    let source: CredentialSource
 
     /// メニューバーに出す主トラック。残量が最も少ないものを採用する（一番効くリミット）。
     var primary: UsageTrack? {
@@ -179,15 +159,17 @@ enum FetchError: LocalizedError {
     /// 各 fetcher は再試行後の 401 を `.claudeAuthExpired` / `.codexAuthExpired` に
     /// 変換する責任を持つ。念のためメッセージ自体もサービス非依存にしてある。
     case unauthorized
-    /// 再読込しても有効なトークンが得られなかった状態。自前リフレッシュはしないので、
-    /// 復帰は Claude Code / Codex CLI 側のトークン更新を待つしかない。
+    /// 再読込しても有効なトークンが得られなかった状態。
     case claudeAuthExpired
+    /// 公式 Claude CLI への委譲は試みたが、有効な認証情報へ更新できなかった状態。
+    case claudeAuthRefreshFailed(String)
+    /// Claude Desktop の利用とは別に、Claude CLI 自身の初回セットアップが必要な状態。
+    case claudeCLISetupRequired
+    /// refresh token の失効・取り消しなどにより、ユーザ自身の再ログインが必要な状態。
+    case claudeLoginRequired
+    /// 安全に自動応答できない対話画面が表示され、ターミナルでの確認が必要な状態。
+    case claudeCLIInteractionRequired
     case codexAuthExpired
-    /// アプリが保持している長期トークンが拒否された状態。
-    ///
-    /// Claude Code の認証切れとは復旧手順が違う（`claude` の起動では直らず、
-    /// `claude setup-token` での再発行が要る）ので別のケースにしてある。
-    case longLivedTokenInvalid(String)
     case decodeFailed(String)
     case network(Error)
     case http(Int, String)
@@ -196,9 +178,15 @@ enum FetchError: LocalizedError {
         switch self {
         case .missingClaudeOAuthCredentials: return "Claude auth not found. Run `claude auth login` first."
         case .unauthorized: return "Auth rejected (HTTP 401)."
-        case .claudeAuthExpired: return "Claude auth expired. Start Claude Code, or run `claude auth login`."
+        case .claudeAuthExpired: return "Claude auth expired. Use manual refresh, or run `claude auth login`."
+        case .claudeAuthRefreshFailed(let m): return "Claude CLI auth refresh failed: \(m)"
+        case .claudeCLISetupRequired:
+            return "Claude CLI setup required. Run `claude` once in Terminal and complete the setup."
+        case .claudeLoginRequired:
+            return "Claude login required. Run `claude auth login` in Terminal."
+        case .claudeCLIInteractionRequired:
+            return "Claude CLI needs interactive attention. Run `claude` in Terminal and follow its instructions."
         case .codexAuthExpired: return "Codex auth expired. Run `codex login` again."
-        case .longLivedTokenInvalid(let m): return "長期トークンが拒否されました: \(m)"
         case .decodeFailed(let m): return "レスポンス解析失敗: \(m)"
         case .network(let e): return "通信エラー: \(e.localizedDescription)"
         case .http(let code, let body):
@@ -207,12 +195,13 @@ enum FetchError: LocalizedError {
         }
     }
 
-    /// 認証切れで、アプリ側からは復帰させられない状態か。
-    /// true の間は API を叩かず、更新間隔も長めに落とす。
+    /// 認証切れで、同じトークンのまま Usage API を再送すべきでない状態か。
+    /// true の間は更新間隔を長めに落とし、Claude は設定に応じて公式 CLI へ更新を委譲する。
     var isAuthExpired: Bool {
         switch self {
-        case .claudeAuthExpired, .codexAuthExpired, .missingClaudeOAuthCredentials, .unauthorized,
-             .longLivedTokenInvalid:
+        case .claudeAuthExpired, .claudeAuthRefreshFailed, .claudeCLISetupRequired,
+             .claudeLoginRequired, .claudeCLIInteractionRequired, .codexAuthExpired,
+             .missingClaudeOAuthCredentials, .unauthorized:
             return true
         case .decodeFailed, .network, .http:
             return false
@@ -226,12 +215,20 @@ enum FetchError: LocalizedError {
     /// ブラウザでの再サインインを伴うため。
     var recoveryHint: String? {
         switch self {
-        case .missingClaudeOAuthCredentials, .claudeAuthExpired, .unauthorized:
+        case .missingClaudeOAuthCredentials:
+            return "復帰方法: ターミナルで `claude auth login` を実行してください。"
+        case .claudeAuthExpired, .unauthorized:
+            return "復帰方法: 手動更新を実行してください。直らなければ `claude auth login`。"
+        case .claudeAuthRefreshFailed:
             return "復帰方法: ターミナルで `claude` を起動してください。直らなければ `claude auth login`。"
+        case .claudeCLISetupRequired:
+            return "復帰方法: ターミナルで `claude` を一度起動し、初回設定を完了してください。"
+        case .claudeLoginRequired:
+            return "復帰方法: ターミナルで `claude auth login` を実行してください。"
+        case .claudeCLIInteractionRequired:
+            return "復帰方法: ターミナルで `claude` を起動し、表示された案内を確認してください。"
         case .codexAuthExpired:
             return "復帰方法: ターミナルで `codex` を起動してください。直らなければ `codex login`。"
-        case .longLivedTokenInvalid:
-            return "復帰方法: `claude setup-token` で再発行し、保存し直してください。"
         case .decodeFailed, .network, .http:
             return nil
         }

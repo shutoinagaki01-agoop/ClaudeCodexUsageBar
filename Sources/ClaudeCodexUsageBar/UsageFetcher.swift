@@ -22,47 +22,18 @@ import Foundation
 /// `~/Library/Application Support/ClaudeCodexUsageBar/last_response.json` に保存する。
 /// 認証情報はダンプ対象に含めない。
 ///
-/// ## 認証情報は読み取り専用に扱う
+/// ## 認証情報の更新は公式 CLI に委譲する
 ///
-/// このクライアントは Claude Code の認証情報を **読むだけ** で、リフレッシュも保存もしない。
+/// このクライアント自身は Claude Code の認証情報を **読むだけ** で、リフレッシュも保存もしない。
 /// 自前でリフレッシュすると、サーバがリフレッシュトークンをローテーションした場合に
 /// Claude Code 側に古いトークンが残り、Claude Code をログアウトさせ得る。
-/// トークンの更新は Claude Code 本体に任せ、こちらは期限切れを検出したら
-/// キャッシュを捨てて読み直すだけにする。
+/// 期限切れ時は、許可された場合に限り公式 `claude` を PTY で起動して `/status` を送り、
+/// Claude Code 自身に更新させる。認証情報が実際に変わったことを確認してから再試行する。
 final class UsageFetcher {
 
     private let session: URLSession
     private let claudeOAuthUsageURL = URL(string: "https://api.anthropic.com/api/oauth/usage")!
-    /// プラン名の取得先。usage レスポンスにプラン名は含まれないため、
-    /// 認証情報から取れない長期トークン経路でだけ使う。
-    private let claudeOAuthProfileURL = URL(string: "https://api.anthropic.com/api/oauth/profile")!
-    private let claudeCredentialsURL = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent(".claude/.credentials.json")
     private var cachedClaudeOAuthCredentials: ClaudeOAuthCredentials?
-
-    /// このアプリ自身が持つ長期トークンの置き場所。
-    ///
-    /// `claude setup-token` が発行する 1 年トークン（`sk-ant-oat...`）を、
-    /// ユーザが `security add-generic-password` で自分で格納する。
-    /// アプリは読むだけで、書き込みも発行も行わない。
-    ///
-    /// service は既存のアプリ用項目と共用し、account だけ分ける。
-    /// 同 service には sessionKey 時代の `claude.ai.sessionKey` が残っているが、
-    /// account が違うので干渉しない。
-    private let longLivedTokenService = "com.example.ClaudeCodexUsageBar"
-    private let longLivedTokenAccount = "claude.oauth.longLivedToken"
-    /// 読み込み済みかどうか。「読んだが未設定」と「未読」を区別するために別に持つ。
-    private var longLivedTokenLoaded = false
-    private var cachedLongLivedToken: String?
-    /// 拒否された長期トークンと、その理由。
-    ///
-    /// Claude Code の認証情報と同じく、拒否済みのまま投げ続けないための門番。
-    /// 理由も持つのは、API を叩かずに同じ説明を UI へ返せるようにするため。
-    private var rejectedLongLivedToken: (digest: String, reason: String)?
-    /// profile から引いたプラン名。トークンが入れ替わるまで使い回す。
-    /// 「解決済みだが取得できなかった」と「未解決」を区別するためにフラグを別に持つ。
-    private var longLivedPlanResolved = false
-    private var cachedLongLivedPlan: String?
     /// 401 で拒否されたアクセストークンのダイジェスト。
     ///
     /// 拒否されたトークンは認証情報が入れ替わるまで何度投げても 401 なので、
@@ -80,9 +51,11 @@ final class UsageFetcher {
         self.session = URLSession(configuration: config)
     }
 
-    /// - Parameter forceRejectedTokenRetry: 明示的な手動更新から呼ばれた時だけ true。
+    /// - Parameters:
+    ///   - forceRejectedTokenRetry: 明示的な手動更新から呼ばれた時だけ true。
     ///   キャッシュを破棄して最新の認証情報を読み直した上で、拒否済みマークと
-    ///   期限切れ判定の両方を無視して 1 回だけ強制的に試す。
+    ///   期限内の拒否済みトークンを 1 回だけ強制的に試す。
+    ///   - authRefreshInteraction: 期限切れ時に公式 Claude CLI を起動してよい条件。
     ///
     ///   拒否済みマークは事前にクリアしない。ゲートの通過は下の
     ///   `forceRejectedTokenRetry ||` が担っており、事前にクリアすると
@@ -91,31 +64,28 @@ final class UsageFetcher {
     ///   解除は 200 が返った時にだけ行う。
     ///
     ///   自動更新（タイマー、スリープ復帰、起動時）では常に false のままにする。
-    ///   Claude Code が動いていなければトークンは更新されないので、停止状態から
-    ///   抜ける手段としてこの強制経路が必要になる。
     ///   再度 401 なら `requestUsage` が拒否済みマークを付け直すので、
     ///   連続通信にはならない。
-    func fetchUsage(forceRejectedTokenRetry: Bool = false) async throws -> UsageSnapshot {
+    func fetchUsage(
+        forceRejectedTokenRetry: Bool = false,
+        authRefreshInteraction: ClaudeAuthRefreshInteraction = .disabled
+    ) async throws -> UsageSnapshot {
         if forceRejectedTokenRetry {
             cachedClaudeOAuthCredentials = nil
-            longLivedTokenLoaded = false
-            cachedLongLivedToken = nil
-        }
-
-        // 長期トークンがあれば最優先で使い、Claude Code の認証情報は一切見ない。
-        // こちらは 1 年有効なので、8 時間ごとの失効も、Claude Code が
-        // Keychain を更新してくれるかどうかへの依存も無くなる。
-        if let token = loadLongLivedToken() {
-            return try await fetchUsingLongLivedToken(token, force: forceRejectedTokenRetry)
         }
 
         guard let credentials = loadClaudeOAuthCredentials() else {
-            throw FetchError.missingClaudeOAuthCredentials
+            return try await recoverUsingClaudeCLI(
+                previous: nil,
+                interaction: authRefreshInteraction,
+                fallbackError: .missingClaudeOAuthCredentials
+            )
         }
 
         // 期限切れ、または前回 401 で拒否されたトークンのままなら API を叩かない。
         // その状態で投げても 401 が返るだけなので、認証情報が入れ替わるのを待つ。
-        if forceRejectedTokenRetry || canAttempt(credentials) {
+        // 手動更新でも、ローカルで期限切れと分かっているトークンは送信せず CLI 更新へ進む。
+        if canAttempt(credentials) || (forceRejectedTokenRetry && !credentials.isExpired) {
             do {
                 return try await requestUsage(credentials: credentials)
             } catch FetchError.unauthorized {
@@ -123,152 +93,20 @@ final class UsageFetcher {
             }
         }
 
-        // 読み直して「別のトークンかつ使える」時だけ 1 回だけ試す。
-        guard let reloaded = reloadedCredentialsIfUsable(previous: credentials) else {
-            throw FetchError.claudeAuthExpired
-        }
-        do {
-            return try await requestUsage(credentials: reloaded)
-        } catch FetchError.unauthorized {
-            // 更新後のトークンでも 401 なら、アプリ側から復帰させる手段は無い。
-            // .unauthorized を外に出すと共通のエラー文で表示されてしまうため変換する。
-            throw FetchError.claudeAuthExpired
-        }
-    }
-
-    // MARK: - 長期トークン（読み取り専用）
-
-    private func loadLongLivedToken() -> String? {
-        if longLivedTokenLoaded {
-            return cachedLongLivedToken
-        }
-        longLivedTokenLoaded = true
-
-        guard let data = SecurityCLI.genericPassword(
-            service: longLivedTokenService,
-            account: longLivedTokenAccount
-        ) else {
-            cachedLongLivedToken = nil
-            return nil
+        // Desktop / CLI が別途更新済みかもしれないので、子プロセスを起動する前に再読込する。
+        if let reloaded = reloadedCredentialsIfUsable(previous: credentials) {
+            do {
+                return try await requestUsage(credentials: reloaded)
+            } catch FetchError.unauthorized {
+                // 公式 CLI への委譲に進む。
+            }
         }
 
-        let token = String(decoding: data, as: UTF8.self)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        cachedLongLivedToken = token.isEmpty ? nil : token
-        return cachedLongLivedToken
-    }
-
-    /// 長期トークンでの取得。
-    ///
-    /// 失効判定は無い。1 年トークンなので期限切れを気にする必要が無い。
-    /// 401 と「スコープ不足の 403」だけは、原因が特定できるので専用のエラーに変換する。
-    ///
-    /// - Parameter force: 手動更新から来た時だけ true。拒否済みマークを無視して 1 回試す。
-    private func fetchUsingLongLivedToken(_ token: String, force: Bool) async throws -> UsageSnapshot {
-        let digest = TokenDigest.of(token)
-
-        // 拒否されたトークンは、ユーザが入れ替えるまで何度投げても同じ結果になる。
-        // Claude Code の認証情報と違って勝手に更新されることが無いぶん、
-        // ここで打ち切らないと 10 分ごとに無意味な 401 を投げ続ける。
-        //
-        // 打ち切る時もキャッシュは毎回捨てる。捨てないとキーチェーンを読み直さず、
-        // ユーザがトークンを入れ替えても気付けないまま止まり続ける。
-        if !force, let rejected = rejectedLongLivedToken, rejected.digest == digest {
-            invalidateLongLivedTokenCache()
-            throw FetchError.longLivedTokenInvalid(rejected.reason)
-        }
-
-        do {
-            let data = try await getOAuthUsage(accessToken: token)
-            // 200 が返った時点でトークンは有効。解除はここでだけ行う。
-            rejectedLongLivedToken = nil
-            DebugDump.write(data: data, url: claudeOAuthUsageURL)
-            let plan = await longLivedPlan(accessToken: token)
-            return try makeSnapshot(from: data, planHint: plan, source: .longLivedToken)
-        } catch FetchError.unauthorized {
-            throw rejectLongLivedToken(digest: digest, reason: "HTTP 401")
-        } catch FetchError.http(403, let body) {
-            // 実観測では、権限が足りない時に不足しているスコープ名が本文に入る。
-            // `user:profile` は usage エンドポイントが要求するもの。
-            let scope = ["user:profile", "user:inference"].first { body.contains($0) }
-            let detail = scope.map { "スコープ \($0) が不足しています" } ?? "HTTP 403"
-            throw rejectLongLivedToken(digest: digest, reason: detail)
-        }
-    }
-
-    private func rejectLongLivedToken(digest: String, reason: String) -> FetchError {
-        rejectedLongLivedToken = (digest: digest, reason: reason)
-        invalidateLongLivedTokenCache()
-        return FetchError.longLivedTokenInvalid(reason)
-    }
-
-    /// 長期トークン経路のプラン名。
-    ///
-    /// usage レスポンスにプラン名は無く、長期トークンには認証情報も付随しないので、
-    /// profile エンドポイントから 1 回だけ取ってプロセス内に保持する。
-    /// プラン名は頻繁に変わらないため、取得のたびに問い合わせる必要は無い。
-    ///
-    /// 失敗しても利用量の表示は妨げない。恒久的な拒否（401 / 403）なら以後諦め、
-    /// 通信エラーなら次の取得でもう一度試す。
-    private func longLivedPlan(accessToken: String) async -> String? {
-        if longLivedPlanResolved {
-            return cachedLongLivedPlan
-        }
-
-        do {
-            let data = try await getOAuth(claudeOAuthProfileURL, accessToken: accessToken)
-            longLivedPlanResolved = true
-            cachedLongLivedPlan = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])
-                .flatMap { $0 }
-                .flatMap(extractProfilePlan)
-        } catch FetchError.unauthorized {
-            longLivedPlanResolved = true
-        } catch FetchError.http(403, _) {
-            longLivedPlanResolved = true
-        } catch {
-            // 通信エラーなどの一時的な失敗。解決済みにはせず、次回また試す。
-        }
-        return cachedLongLivedPlan
-    }
-
-    /// profile レスポンスからプラン名を組み立てる。
-    ///
-    /// 実観測では次の形をしている。Claude Code 認証経路の `subscriptionType`
-    /// （"team"）と揃うよう、`claude_` 接頭辞を落とす。
-    /// ```json
-    /// { "account":      { "has_claude_max": false, "has_claude_pro": false },
-    ///   "organization": { "organization_type": "claude_team",
-    ///                     "rate_limit_tier": "default_raven" } }
-    /// ```
-    private func extractProfilePlan(from root: [String: Any]) -> String? {
-        let organization = root["organization"] as? [String: Any]
-
-        if let type = organization?["organization_type"] as? String, !type.isEmpty {
-            return type.hasPrefix("claude_") ? String(type.dropFirst("claude_".count)) : type
-        }
-        // 個人プランには organization_type が無いことがあるので、アカウント側から拾う。
-        if let account = root["account"] as? [String: Any] {
-            if account["has_claude_max"] as? Bool == true { return "max" }
-            if account["has_claude_pro"] as? Bool == true { return "pro" }
-        }
-        if let tier = organization?["rate_limit_tier"] as? String, !tier.isEmpty {
-            return tier
-        }
-        return nil
-    }
-
-    /// 次回の取得でキーチェーンを読み直させる。
-    ///
-    /// 拒否状態の間はこれを毎回呼ぶ。ユーザがトークンを入れ替えたら手動更新を待たずに
-    /// 復帰できるようにするためで、Claude Code 経路が認証情報の入れ替わりを待つのと
-    /// 同じ形にそろえてある。読み直すだけで API は叩かない
-    /// （同じトークンなら拒否済みの門番が止める）。
-    private func invalidateLongLivedTokenCache() {
-        longLivedTokenLoaded = false
-        cachedLongLivedToken = nil
-        // プラン名はトークン（＝アカウント）に紐づくので一緒に捨てる。
-        longLivedPlanResolved = false
-        cachedLongLivedPlan = nil
+        return try await recoverUsingClaudeCLI(
+            previous: credentials,
+            interaction: authRefreshInteraction,
+            fallbackError: .claudeAuthExpired
+        )
     }
 
     // MARK: - Claude OAuth（読み取り専用）
@@ -289,16 +127,55 @@ final class UsageFetcher {
         }
     }
 
+    /// 公式 Claude CLI に認証更新を委譲し、更新後の認証情報で Usage API を 1 回だけ再試行する。
+    ///
+    /// アプリ自身は refresh token に触れない。成功条件も「CLI を起動できた」ではなく、
+    /// 認証情報のアクセストークンが実際に変わり、その新しいトークンで Usage API が通ること。
+    private func recoverUsingClaudeCLI(
+        previous: ClaudeOAuthCredentials?,
+        interaction: ClaudeAuthRefreshInteraction,
+        fallbackError: FetchError
+    ) async throws -> UsageSnapshot {
+        guard interaction != .disabled else { throw fallbackError }
+
+        let outcome = await ClaudeOAuthDelegatedRefreshCoordinator.shared.refresh(
+            previousCredentials: previous,
+            interaction: interaction
+        )
+
+        switch outcome {
+        case .refreshed(let credentials):
+            cachedClaudeOAuthCredentials = credentials
+            do {
+                return try await requestUsage(credentials: credentials)
+            } catch FetchError.unauthorized {
+                throw FetchError.claudeAuthRefreshFailed("更新後の認証情報が HTTP 401 で拒否されました。")
+            }
+        case .skippedByCooldown, .skippedByPolicy:
+            throw fallbackError
+        case .cliUnavailable:
+            throw FetchError.claudeAuthRefreshFailed("`claude` コマンドが見つかりません。")
+        case .onboardingRequired:
+            throw FetchError.claudeCLISetupRequired
+        case .loginRequired:
+            throw FetchError.claudeLoginRequired
+        case .manualInteractionRequired:
+            throw FetchError.claudeCLIInteractionRequired
+        case .failed(let message):
+            throw FetchError.claudeAuthRefreshFailed(message)
+        }
+    }
+
     /// キャッシュを破棄して認証情報を読み直し、再試行に使えるものだけを返す。
     ///
     /// 「使える」条件は次の 2 つを満たすこと。どちらか欠けたら nil を返し、
     /// 呼び出し側は API を叩かずに認証切れとして扱う。
-    ///   1. アクセストークンが前回と異なる（= Claude Code が更新した）
+    ///   1. 認証情報が前回と異なる（access token または有効期限などを Claude Code が更新した）
     ///   2. 期限切れでなく、かつ 401 で拒否されたトークンでない
     private func reloadedCredentialsIfUsable(previous: ClaudeOAuthCredentials) -> ClaudeOAuthCredentials? {
         cachedClaudeOAuthCredentials = nil
         guard let reloaded = loadClaudeOAuthCredentials() else { return nil }
-        guard reloaded.accessTokenDigest != previous.accessTokenDigest else { return nil }
+        guard reloaded != previous else { return nil }
         guard canAttempt(reloaded) else { return nil }
         return reloaded
     }
@@ -308,46 +185,9 @@ final class UsageFetcher {
             return cachedClaudeOAuthCredentials
         }
 
-        let credentials = loadCredentialsFromFile() ?? loadCredentialsFromKeychain()
+        let credentials = ClaudeOAuthCredentialReader.load()
         cachedClaudeOAuthCredentials = credentials
         return credentials
-    }
-
-    private func loadCredentialsFromFile() -> ClaudeOAuthCredentials? {
-        guard let data = try? Data(contentsOf: claudeCredentialsURL) else { return nil }
-        return parseClaudeOAuthCredentials(from: data)
-    }
-
-    /// Claude Code が使う service 名。先に見つかった方を採用する。
-    private let claudeKeychainServices = ["Claude Code-credentials", "Claude Code"]
-
-    private func loadCredentialsFromKeychain() -> ClaudeOAuthCredentials? {
-        for service in claudeKeychainServices {
-            // account は環境によって異なる（ユーザ名が入る）ので属性から拾う。
-            // 拾えなければ service だけで引く。
-            let account = SecurityCLI.genericPasswordAccount(service: service)
-            guard let data = SecurityCLI.genericPassword(service: service, account: account),
-                  let credentials = parseClaudeOAuthCredentials(from: data)
-            else {
-                continue
-            }
-            return credentials
-        }
-        return nil
-    }
-
-    private func parseClaudeOAuthCredentials(from data: Data) -> ClaudeOAuthCredentials? {
-        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
-        guard let oauth = root["claudeAiOauth"] as? [String: Any] else { return nil }
-        guard let accessToken = oauth["accessToken"] as? String, !accessToken.isEmpty else { return nil }
-        let expiresAt = numeric(oauth["expiresAt"]).map { Date(timeIntervalSince1970: $0 / 1000.0) }
-        return ClaudeOAuthCredentials(
-            accessToken: accessToken,
-            expiresAt: expiresAt,
-            scopes: oauth["scopes"] as? [String] ?? [],
-            rateLimitTier: oauth["rateLimitTier"] as? String,
-            subscriptionType: oauth["subscriptionType"] as? String
-        )
     }
 
     private func fetchOAuthUsage(credentials: ClaudeOAuthCredentials) async throws -> UsageSnapshot {
@@ -356,18 +196,6 @@ final class UsageFetcher {
         // 拒否済みマークはここで外す。
         rejectedAccessTokenDigest = nil
         DebugDump.write(data: data, url: claudeOAuthUsageURL)
-        return try makeSnapshot(
-            from: data,
-            planHint: credentials.subscriptionType ?? credentials.rateLimitTier,
-            source: .claudeCode
-        )
-    }
-
-    /// レスポンスを UsageSnapshot に変換する。認証情報の出どころに依存しない部分。
-    ///
-    /// - Parameter planHint: 認証情報から分かるプラン名。長期トークンには
-    ///   付随情報が無いので nil になり、その場合はレスポンス本体から拾う。
-    private func makeSnapshot(from data: Data, planHint: String?, source: CredentialSource) throws -> UsageSnapshot {
         guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw FetchError.decodeFailed("Claude OAuth usage: not a JSON object")
         }
@@ -376,19 +204,14 @@ final class UsageFetcher {
             throw FetchError.decodeFailed("Claude OAuth usage: usage tracks not found. top-level keys=\(Array(json.keys).sorted())")
         }
         return UsageSnapshot(
-            plan: planHint ?? extractPlan(from: json),
+            plan: credentials.subscriptionType ?? credentials.rateLimitTier ?? extractPlan(from: json),
             tracks: tracks,
-            fetchedAt: Date(),
-            source: source
+            fetchedAt: Date()
         )
     }
 
     private func getOAuthUsage(accessToken: String) async throws -> Data {
-        try await getOAuth(claudeOAuthUsageURL, accessToken: accessToken)
-    }
-
-    private func getOAuth(_ url: URL, accessToken: String) async throws -> Data {
-        var req = URLRequest(url: url)
+        var req = URLRequest(url: claudeOAuthUsageURL)
         req.httpMethod = "GET"
         req.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         req.setValue("application/json", forHTTPHeaderField: "Accept")
@@ -619,6 +442,12 @@ final class UsageFetcher {
 /// `security` はシェルを介さず `executableURL` + 引数配列で直接起動する。
 /// 秘密値は引数ではなく stdout で受け取り、ログにもダンプにも出さない。
 enum SecurityCLI {
+    struct GenericPasswordMetadata: Equatable, Sendable {
+        let account: String?
+        /// 通常は `mdat` 行のダイジェスト。属性が取れない環境ではメタデータ全体のダイジェスト。
+        let modificationMarker: String
+    }
+
     private static let executableURL = URL(fileURLWithPath: "/usr/bin/security")
 
     /// 汎用パスワード項目の中身を取り出す。復号を伴うため、初回は認可が必要になる。
@@ -635,33 +464,55 @@ enum SecurityCLI {
         return Data(trimmed.utf8)
     }
 
-    /// 項目の `acct` 属性だけを読む。復号を伴わないので認可ダイアログは出ない。
-    ///
-    /// Claude Code は account にログインユーザ名を入れるため、環境ごとに値が違う。
-    /// 決め打ちにせずここで拾う。
-    static func genericPasswordAccount(service: String) -> String? {
-        guard let output = run(["find-generic-password", "-s", service]) else { return nil }
+    /// パスワードを復号せず、account と変更識別子だけを読む。
+    /// `-w` を付けないため、Keychain の値に対する認可ダイアログは発生しない。
+    static func genericPasswordMetadata(service: String) -> GenericPasswordMetadata? {
+        // `security` は属性一覧を stderr に出すため、この非秘密経路だけ stderr も捕捉する。
+        guard let output = run(
+            ["find-generic-password", "-s", service],
+            captureStandardError: true
+        ) else { return nil }
+        return parseGenericPasswordMetadata(output)
+    }
+
+    /// `security find-generic-password` の属性出力を秘密値なしで解析する。
+    /// テスト用のサンプル出力にも使えるよう、プロセス起動とは分けてある。
+    static func parseGenericPasswordMetadata(_ output: String) -> GenericPasswordMetadata? {
+        guard !output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
 
         // 出力例: `    "acct"<blob>="shuto.inagaki01"`
         let marker = "\"acct\"<blob>=\""
+        var account: String?
         for line in output.split(separator: "\n") {
             guard let start = line.range(of: marker) else { continue }
             let rest = line[start.upperBound...]
             guard let end = rest.lastIndex(of: "\"") else { continue }
-            let account = String(rest[..<end])
-            return account.isEmpty ? nil : account
+            let value = String(rest[..<end])
+            account = value.isEmpty ? nil : value
+            break
         }
-        return nil
+
+        let modificationLine = output.split(separator: "\n")
+            .first { $0.contains("\"mdat\"") }
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+        let fingerprintSource = modificationLine ?? output
+        return GenericPasswordMetadata(
+            account: account,
+            modificationMarker: TokenDigest.of(fingerprintSource)
+        )
     }
 
-    private static func run(_ arguments: [String]) -> String? {
+    private static func run(
+        _ arguments: [String],
+        captureStandardError: Bool = false
+    ) -> String? {
         let process = Process()
         process.executableURL = executableURL
         process.arguments = arguments
 
         let stdout = Pipe()
         process.standardOutput = stdout
-        process.standardError = FileHandle.nullDevice
+        process.standardError = captureStandardError ? stdout : FileHandle.nullDevice
 
         do {
             try process.run()
