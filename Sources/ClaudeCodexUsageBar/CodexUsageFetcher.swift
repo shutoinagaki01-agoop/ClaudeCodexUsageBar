@@ -44,6 +44,7 @@ final class CodexUsageFetcher {
     ///
     ///   自動更新（タイマー、スリープ復帰、起動時、リセット成功後の再取得）では false のまま。
     func fetchUsage(forceRejectedTokenRetry: Bool = false) async throws -> CodexUsageSnapshot {
+        try Task.checkCancellation()
         let auth = try loadAuth()
 
         // 前回 401 で拒否されたトークンのままなら API を叩かない。
@@ -95,6 +96,7 @@ final class CodexUsageFetcher {
 
     /// 401 だったトークンを覚える。API 呼び出しは必ずここを通す。
     private func requestUsageSnapshot(auth: CodexAuth) async throws -> CodexUsageSnapshot {
+        try Task.checkCancellation()
         let data: Data
         do {
             data = try await getUsage(accessToken: auth.accessToken, accountID: auth.accountID)

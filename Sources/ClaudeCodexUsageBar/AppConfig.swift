@@ -1,6 +1,6 @@
 import Foundation
 
-/// 自動更新の時間設定。メニューから変更し、UserDefaults に保存する。
+/// 利用サービス・表示・自動更新の設定。メニューから変更し、UserDefaults に保存する。
 struct AppConfig {
     let peakRefreshInterval: TimeInterval
     let normalRefreshInterval: TimeInterval
@@ -15,6 +15,8 @@ struct AppConfig {
     let peakRefreshEndHour: Int
     let peakRefreshEndMinute: Int
     let autoRefreshTimeZone: TimeZone
+    var claudeEnabled: Bool
+    var codexEnabled: Bool
     let menuBarUsesIcons: Bool
     /// 認証切れ時に、定期更新から公式 Claude CLI を PTY 起動してよいか。
     /// 手動更新はこの設定にかかわらずユーザ操作として許可される。
@@ -33,8 +35,7 @@ struct AppConfig {
     /// その折り合いとして 10 分を採る。手動更新はこの間隔を待たずに実行できる。
     static let authExpiredRefreshInterval: TimeInterval = 10 * 60
 
-    static func load() -> AppConfig {
-        let defaults = UserDefaults.standard
+    static func load(defaults: UserDefaults = .standard) -> AppConfig {
         return AppConfig(
             peakRefreshInterval: defaults.timeInterval(forKey: Keys.peakRefreshInterval, default: 3 * 60),
             normalRefreshInterval: defaults.timeInterval(forKey: Keys.normalRefreshInterval, default: 5 * 60),
@@ -49,6 +50,8 @@ struct AppConfig {
             peakRefreshEndHour: defaults.integer(forKey: Keys.peakRefreshEndHour, default: 16),
             peakRefreshEndMinute: defaults.integer(forKey: Keys.peakRefreshEndMinute, default: 0),
             autoRefreshTimeZone: TimeZone(identifier: "Asia/Tokyo")!,
+            claudeEnabled: defaults.bool(forKey: Keys.claudeEnabled, default: true),
+            codexEnabled: defaults.bool(forKey: Keys.codexEnabled, default: true),
             menuBarUsesIcons: defaults.bool(forKey: Keys.menuBarUsesIcons, default: true),
             allowBackgroundClaudeAuthRefresh: defaults.bool(
                 forKey: Keys.allowBackgroundClaudeAuthRefresh,
@@ -59,8 +62,9 @@ struct AppConfig {
         )
     }
 
-    func save() {
-        let defaults = UserDefaults.standard
+    func save(defaults: UserDefaults = .standard) {
+        defaults.set(claudeEnabled, forKey: Keys.claudeEnabled)
+        defaults.set(codexEnabled, forKey: Keys.codexEnabled)
         defaults.set(peakRefreshInterval, forKey: Keys.peakRefreshInterval)
         defaults.set(normalRefreshInterval, forKey: Keys.normalRefreshInterval)
         defaults.set(autoRefreshStartHour, forKey: Keys.autoRefreshStartHour)
@@ -92,6 +96,8 @@ struct AppConfig {
             peakRefreshEndHour: peakRefreshEndHour,
             peakRefreshEndMinute: peakRefreshEndMinute,
             autoRefreshTimeZone: autoRefreshTimeZone,
+            claudeEnabled: claudeEnabled,
+            codexEnabled: codexEnabled,
             menuBarUsesIcons: enabled,
             allowBackgroundClaudeAuthRefresh: allowBackgroundClaudeAuthRefresh,
             selectedClaudeMenuBarTrackLabel: selectedClaudeMenuBarTrackLabel,
@@ -114,6 +120,8 @@ struct AppConfig {
             peakRefreshEndHour: peakRefreshEndHour,
             peakRefreshEndMinute: peakRefreshEndMinute,
             autoRefreshTimeZone: autoRefreshTimeZone,
+            claudeEnabled: claudeEnabled,
+            codexEnabled: codexEnabled,
             menuBarUsesIcons: menuBarUsesIcons,
             allowBackgroundClaudeAuthRefresh: allowBackgroundClaudeAuthRefresh,
             selectedClaudeMenuBarTrackLabel: label,
@@ -136,6 +144,8 @@ struct AppConfig {
             peakRefreshEndHour: peakRefreshEndHour,
             peakRefreshEndMinute: peakRefreshEndMinute,
             autoRefreshTimeZone: autoRefreshTimeZone,
+            claudeEnabled: claudeEnabled,
+            codexEnabled: codexEnabled,
             menuBarUsesIcons: menuBarUsesIcons,
             allowBackgroundClaudeAuthRefresh: allowBackgroundClaudeAuthRefresh,
             selectedClaudeMenuBarTrackLabel: selectedClaudeMenuBarTrackLabel,
@@ -158,6 +168,8 @@ struct AppConfig {
             peakRefreshEndHour: peakRefreshEndHour,
             peakRefreshEndMinute: peakRefreshEndMinute,
             autoRefreshTimeZone: autoRefreshTimeZone,
+            claudeEnabled: claudeEnabled,
+            codexEnabled: codexEnabled,
             menuBarUsesIcons: menuBarUsesIcons,
             allowBackgroundClaudeAuthRefresh: enabled,
             selectedClaudeMenuBarTrackLabel: selectedClaudeMenuBarTrackLabel,
@@ -192,6 +204,8 @@ struct AppConfig {
         static let peakRefreshStartMinute = "settings.peakRefreshStartMinute"
         static let peakRefreshEndHour = "settings.peakRefreshEndHour"
         static let peakRefreshEndMinute = "settings.peakRefreshEndMinute"
+        static let claudeEnabled = "settings.claudeEnabled"
+        static let codexEnabled = "settings.codexEnabled"
         static let menuBarUsesIcons = "settings.menuBarUsesIcons"
         static let allowBackgroundClaudeAuthRefresh = "settings.allowBackgroundClaudeAuthRefresh"
         static let selectedClaudeMenuBarTrackLabel = "settings.selectedClaudeMenuBarTrackLabel"

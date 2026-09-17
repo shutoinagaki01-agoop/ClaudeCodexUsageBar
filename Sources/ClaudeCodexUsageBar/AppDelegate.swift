@@ -6,6 +6,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private var statusItem: NSStatusItem!
     private var claudeTimer: Timer?
     private var codexTimer: Timer?
+    private var claudeRefreshTask: Task<Void, Never>?
+    private var codexRefreshTask: Task<Void, Never>?
     /// 取得はせず、リセット時刻を跨いだ時に表示だけ作り直すためのタイマー。
     private var staleDisplayTimer: Timer?
     private let fetcher = UsageFetcher()
@@ -43,10 +45,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        if let button = statusItem.button {
-            setMenuBarTitle("\(claudeTextLabel) …")
-            button.toolTip = "Claude usage"
-        }
+        updateTitle()
 
         rebuildMenu()
         configureNotifications()
@@ -94,94 +93,103 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private func rebuildMenu() {
         let menu = NSMenu()
 
-        if let snap = latest {
-            let planLabel = snap.plan.map { "Claude: \($0)" } ?? "Claude"
-            let plan = NSMenuItem(title: planLabel, action: nil, keyEquivalent: "")
-            plan.isEnabled = false
-            menu.addItem(plan)
+        if config.claudeEnabled {
+            if let snap = latest {
+                let planLabel = snap.plan.map { "Claude: \($0)" } ?? "Claude"
+                let plan = NSMenuItem(title: planLabel, action: nil, keyEquivalent: "")
+                plan.isEnabled = false
+                menu.addItem(plan)
 
-            let selectedTrack = claudeHeaderTrack(from: snap.tracks)
-            for t in sortedClaudeTracks(snap.tracks) {
-                addClaudeTrackItem(to: menu, track: t, selectedTrack: selectedTrack)
-            }
-            let updated = NSMenuItem(title: "Claude 更新: \(formatFetchedAt(snap.fetchedAt))", action: nil, keyEquivalent: "")
-            updated.isEnabled = false
-            menu.addItem(updated)
-            // 取得が止まっていても値自体は残す方針なので、古い理由はここで必ず出す。
-            // 出さないと「更新: 02:11」だけが手掛かりになり、現在値と区別が付かない。
-            if let staleReason = claudeStaleReason {
-                addDisabledItem(to: menu, title: "\(Self.staleMarker) Claude: 最新ではありません")
-                addDisabledItem(to: menu, title: "  \(staleReason)")
+                let selectedTrack = claudeHeaderTrack(from: snap.tracks)
+                for t in sortedClaudeTracks(snap.tracks) {
+                    addClaudeTrackItem(to: menu, track: t, selectedTrack: selectedTrack)
+                }
+                let updated = NSMenuItem(title: "Claude 更新: \(formatFetchedAt(snap.fetchedAt))", action: nil, keyEquivalent: "")
+                updated.isEnabled = false
+                menu.addItem(updated)
+                // 取得が止まっていても値自体は残す方針なので、古い理由はここで必ず出す。
+                // 出さないと「更新: 02:11」だけが手掛かりになり、現在値と区別が付かない。
+                if let staleReason = claudeStaleReason {
+                    addDisabledItem(to: menu, title: "\(Self.staleMarker) Claude: 最新ではありません")
+                    addDisabledItem(to: menu, title: "  \(staleReason)")
+                    if let hint = lastClaudeRecoveryHint {
+                        addDisabledItem(to: menu, title: "  \(hint)")
+                    }
+                }
+                if let nextClaudeAutoRefreshAt {
+                    let next = NSMenuItem(title: "Claude 次回自動更新: \(formatTime(nextClaudeAutoRefreshAt))", action: nil, keyEquivalent: "")
+                    next.isEnabled = false
+                    menu.addItem(next)
+                }
+            } else if let err = latestError {
+                let item = NSMenuItem(title: "Claude: \(err)", action: nil, keyEquivalent: "")
+                item.isEnabled = false
+                menu.addItem(item)
                 if let hint = lastClaudeRecoveryHint {
                     addDisabledItem(to: menu, title: "  \(hint)")
                 }
+            } else {
+                let item = NSMenuItem(title: "Claude: 取得中…", action: nil, keyEquivalent: "")
+                item.isEnabled = false
+                menu.addItem(item)
             }
-            if let nextClaudeAutoRefreshAt {
-                let next = NSMenuItem(title: "Claude 次回自動更新: \(formatTime(nextClaudeAutoRefreshAt))", action: nil, keyEquivalent: "")
-                next.isEnabled = false
-                menu.addItem(next)
-            }
-        } else if let err = latestError {
-            let item = NSMenuItem(title: "Claude: \(err)", action: nil, keyEquivalent: "")
-            item.isEnabled = false
-            menu.addItem(item)
-            if let hint = lastClaudeRecoveryHint {
-                addDisabledItem(to: menu, title: "  \(hint)")
-            }
-        } else {
-            let item = NSMenuItem(title: "Claude: 取得中…", action: nil, keyEquivalent: "")
-            item.isEnabled = false
-            menu.addItem(item)
         }
 
-        if let codex = latestCodex, !codex.tracks.isEmpty {
-            menu.addItem(.separator())
-            let plan = NSMenuItem(title: "Codex: \(codex.plan)", action: nil, keyEquivalent: "")
-            plan.isEnabled = false
-            menu.addItem(plan)
-            let selectedTrack = codexTitleTrack(from: codex)
-            for t in codex.tracks {
-                addCodexTrackItem(to: menu, track: t, selectedTrack: selectedTrack)
-            }
-            let updated = NSMenuItem(title: "Codex 更新: \(formatFetchedAt(codex.fetchedAt))", action: nil, keyEquivalent: "")
-            updated.isEnabled = false
-            menu.addItem(updated)
-            if let staleReason = codexStaleReason {
-                addDisabledItem(to: menu, title: "\(Self.staleMarker) Codex: 最新ではありません")
-                addDisabledItem(to: menu, title: "  \(staleReason)")
+        if config.codexEnabled {
+            if menu.numberOfItems > 0 { menu.addItem(.separator()) }
+            if let codex = latestCodex, !codex.tracks.isEmpty {
+                let plan = NSMenuItem(title: "Codex: \(codex.plan)", action: nil, keyEquivalent: "")
+                plan.isEnabled = false
+                menu.addItem(plan)
+                let selectedTrack = codexTitleTrack(from: codex)
+                for t in codex.tracks {
+                    addCodexTrackItem(to: menu, track: t, selectedTrack: selectedTrack)
+                }
+                let updated = NSMenuItem(title: "Codex 更新: \(formatFetchedAt(codex.fetchedAt))", action: nil, keyEquivalent: "")
+                updated.isEnabled = false
+                menu.addItem(updated)
+                if let staleReason = codexStaleReason {
+                    addDisabledItem(to: menu, title: "\(Self.staleMarker) Codex: 最新ではありません")
+                    addDisabledItem(to: menu, title: "  \(staleReason)")
+                    if let hint = lastCodexRecoveryHint {
+                        addDisabledItem(to: menu, title: "  \(hint)")
+                    }
+                }
+                if let nextCodexAutoRefreshAt {
+                    let next = NSMenuItem(title: "Codex 次回自動更新: \(formatTime(nextCodexAutoRefreshAt))", action: nil, keyEquivalent: "")
+                    next.isEnabled = false
+                    menu.addItem(next)
+                }
+            } else if let latestCodexError {
+                let item = NSMenuItem(title: "Codex: \(latestCodexError)", action: nil, keyEquivalent: "")
+                item.isEnabled = false
+                menu.addItem(item)
                 if let hint = lastCodexRecoveryHint {
                     addDisabledItem(to: menu, title: "  \(hint)")
                 }
+                if let nextCodexAutoRefreshAt {
+                    let next = NSMenuItem(title: "Codex 次回自動更新: \(formatTime(nextCodexAutoRefreshAt))", action: nil, keyEquivalent: "")
+                    next.isEnabled = false
+                    menu.addItem(next)
+                }
+            } else {
+                let item = NSMenuItem(title: "Codex: 取得中…", action: nil, keyEquivalent: "")
+                item.isEnabled = false
+                menu.addItem(item)
             }
-            if let nextCodexAutoRefreshAt {
-                let next = NSMenuItem(title: "Codex 次回自動更新: \(formatTime(nextCodexAutoRefreshAt))", action: nil, keyEquivalent: "")
-                next.isEnabled = false
-                menu.addItem(next)
-            }
-        } else if let latestCodexError {
-            menu.addItem(.separator())
-            let item = NSMenuItem(title: "Codex: \(latestCodexError)", action: nil, keyEquivalent: "")
-            item.isEnabled = false
-            menu.addItem(item)
-            if let hint = lastCodexRecoveryHint {
-                addDisabledItem(to: menu, title: "  \(hint)")
-            }
-            if let nextCodexAutoRefreshAt {
-                let next = NSMenuItem(title: "Codex 次回自動更新: \(formatTime(nextCodexAutoRefreshAt))", action: nil, keyEquivalent: "")
-                next.isEnabled = false
-                menu.addItem(next)
-            }
-        } else if isLoadingCodex {
-            menu.addItem(.separator())
-            let item = NSMenuItem(title: "Codex: 取得中…", action: nil, keyEquivalent: "")
-            item.isEnabled = false
-            menu.addItem(item)
+        }
+        if !config.claudeEnabled && !config.codexEnabled {
+            addDisabledItem(to: menu, title: "「詳細設定 > 利用するサービス」からサービスをオンにしてください")
         }
 
         menu.addItem(.separator())
 
-        addAction(to: menu, title: "Claude/Codexの残量を手動で更新", selector: #selector(refreshAction), key: "r")
-        addCodexResetAction(to: menu)
+        let services = [("Claude", config.claudeEnabled), ("Codex", config.codexEnabled)]
+            .filter { $0.1 }.map { $0.0 }.joined(separator: "/")
+        if !services.isEmpty {
+            addAction(to: menu, title: "\(services)の残量を手動で更新", selector: #selector(refreshAction), key: "r")
+        }
+        if config.codexEnabled { addCodexResetAction(to: menu) }
         addSettingsSubmenu(to: menu)
 
         menu.addItem(.separator())
@@ -235,9 +243,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private func addDataSubmenu(to menu: NSMenu) {
         let parent = NSMenuItem(title: "取得データをFinderで開く", action: nil, keyEquivalent: "")
         let submenu = NSMenu()
-        addAction(to: submenu, title: "Claude", selector: #selector(revealDumpAction), key: "j")
-        addAction(to: submenu, title: "Codex", selector: #selector(revealCodexDumpAction), key: "k")
+        if config.claudeEnabled {
+            addAction(to: submenu, title: "Claude", selector: #selector(revealDumpAction), key: "j")
+        }
+        if config.codexEnabled {
+            addAction(to: submenu, title: "Codex", selector: #selector(revealCodexDumpAction), key: "k")
+        }
         menu.setSubmenu(submenu, for: parent)
+        menu.addItem(parent)
+    }
+
+    private func addServicesSubmenu(to menu: NSMenu) {
+        let parent = NSMenuItem(title: "利用するサービス", action: nil, keyEquivalent: "")
+        let submenu = NSMenu()
+        let claude = NSMenuItem(title: "Claude", action: #selector(toggleClaudeEnabledAction), keyEquivalent: "")
+        claude.target = self
+        claude.state = config.claudeEnabled ? .on : .off
+        submenu.addItem(claude)
+        let codex = NSMenuItem(title: "Codex", action: #selector(toggleCodexEnabledAction), keyEquivalent: "")
+        codex.target = self
+        codex.state = config.codexEnabled ? .on : .off
+        submenu.addItem(codex)
+        parent.submenu = submenu
         menu.addItem(parent)
     }
 
@@ -245,6 +272,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         let parent = NSMenuItem(title: "詳細設定", action: nil, keyEquivalent: "")
         let submenu = NSMenu()
 
+        addServicesSubmenu(to: submenu)
+        submenu.addItem(.separator())
         addDisabledItem(to: submenu, title: "起動時間: \(config.autoRefreshWindowLabel)")
         addDisabledItem(to: submenu, title: "ピーク時間: \(config.peakWindowLabel)")
         addDisabledItem(to: submenu, title: "ピーク時更新間隔: \(formatInterval(config.peakRefreshInterval))")
@@ -254,17 +283,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         iconDisplay.target = self
         iconDisplay.state = config.menuBarUsesIcons ? .on : .off
         submenu.addItem(iconDisplay)
-        let backgroundClaudeAuth = NSMenuItem(
-            title: "Claude認証をバックグラウンドで更新",
-            action: #selector(toggleBackgroundClaudeAuthRefreshAction),
-            keyEquivalent: ""
-        )
-        backgroundClaudeAuth.target = self
-        backgroundClaudeAuth.state = config.allowBackgroundClaudeAuthRefresh ? .on : .off
-        backgroundClaudeAuth.toolTip = "認証切れ時に公式Claude CLIをPTY起動します。Keychainの確認が表示される場合があります。"
-        submenu.addItem(backgroundClaudeAuth)
-        submenu.addItem(.separator())
-        addDataSubmenu(to: submenu)
+        if config.claudeEnabled {
+            let backgroundClaudeAuth = NSMenuItem(
+                title: "Claude認証をバックグラウンドで更新",
+                action: #selector(toggleBackgroundClaudeAuthRefreshAction),
+                keyEquivalent: ""
+            )
+            backgroundClaudeAuth.target = self
+            backgroundClaudeAuth.state = config.allowBackgroundClaudeAuthRefresh ? .on : .off
+            backgroundClaudeAuth.toolTip = "認証切れ時に公式Claude CLIをPTY起動します。Keychainの確認が表示される場合があります。"
+            submenu.addItem(backgroundClaudeAuth)
+        }
+        if config.claudeEnabled || config.codexEnabled {
+            submenu.addItem(.separator())
+            addDataSubmenu(to: submenu)
+        }
         submenu.addItem(.separator())
         let edit = NSMenuItem(title: "時間設定を変更…", action: #selector(editTimeSettingsAction), keyEquivalent: "")
         edit.target = self
@@ -282,6 +315,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
     private func updateTitle() {
         guard let button = statusItem.button else { return }
+        if !config.claudeEnabled && !config.codexEnabled {
+            setMenuBarTitle("使用量")
+            if config.menuBarUsesIcons {
+                button.attributedTitle = NSAttributedString()
+                button.title = ""
+                button.image = NSImage(systemSymbolName: "chart.bar", accessibilityDescription: "使用量")
+            }
+            button.toolTip = "「詳細設定 > 利用するサービス」からサービスをオンにしてください"
+            return
+        }
+        if !config.claudeEnabled {
+            setMenuBarTitle(codexTitlePart(includeUnavailableState: true))
+            button.toolTip = codexToolTipPart()
+            return
+        }
         if let snap = latest, !snap.tracks.isEmpty {
             let sorted = sortedClaudeTracks(snap.tracks)
             let headerTrack = claudeHeaderTrack(from: snap.tracks) ?? sorted.first!
@@ -425,19 +473,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
 
     private func codexTitlePart(includeUnavailableState: Bool = false) -> String {
+        guard config.codexEnabled else { return "" }
+        let separator = config.claudeEnabled ? " | " : ""
         guard let codex = latestCodex, let track = codexTitleTrack(from: codex) else {
             guard includeUnavailableState else { return "" }
             if latestCodexError != nil {
-                return " | \(codexTextLabel) error"
+                return "\(separator)\(codexTextLabel) error"
             }
-            if isLoadingCodex {
-                return " | \(codexTextLabel) …"
-            }
-            return ""
+            return "\(separator)\(codexTextLabel) …"
         }
         let label = track.label == "5h" ? "" : " \(track.label)"
         let staleMark = codexStaleReason == nil ? "" : "\(Self.staleMarker) "
-        return " | \(codexTextLabel)\(label) \(staleMark)\(track.remainingPercent)%·\(shortReset(track))"
+        return "\(separator)\(codexTextLabel)\(label) \(staleMark)\(track.remainingPercent)%·\(shortReset(track))"
     }
 
     private func codexTitleTrack(from snapshot: CodexUsageSnapshot) -> CodexUsageTrack? {
@@ -543,6 +590,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     }
 
     private func codexToolTipPart() -> String {
+        guard config.codexEnabled else { return "" }
         if let codex = latestCodex, !codex.tracks.isEmpty {
             let lines = codex.tracks.map {
                 "Codex \($0.label): 残り \($0.remainingPercent)%, リセット \($0.resetTimeString)"
@@ -661,6 +709,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         promptForTimeSettings()
     }
 
+    @objc private func toggleClaudeEnabledAction() {
+        config.claudeEnabled.toggle()
+        config.save()
+        if config.claudeEnabled {
+            refreshClaude(forceRejectedTokenRetry: true)
+        } else {
+            claudeRefreshTask?.cancel()
+            claudeRefreshTask = nil
+            claudeTimer?.invalidate()
+            claudeTimer = nil
+            nextClaudeAutoRefreshAt = nil
+            isLoadingClaude = false
+            latest = nil
+            latestError = nil
+            lastClaudeFetchFailure = nil
+            lastClaudeRecoveryHint = nil
+            isClaudeAuthExpired = false
+        }
+        scheduleStaleDisplayCheck()
+        updateTitle()
+        rebuildMenu()
+    }
+
+    @objc private func toggleCodexEnabledAction() {
+        config.codexEnabled.toggle()
+        config.save()
+        if config.codexEnabled {
+            refreshCodex(forceRejectedTokenRetry: true)
+        } else {
+            codexRefreshTask?.cancel()
+            codexRefreshTask = nil
+            codexTimer?.invalidate()
+            codexTimer = nil
+            nextCodexAutoRefreshAt = nil
+            isLoadingCodex = false
+            latestCodex = nil
+            latestCodexError = nil
+            lastCodexFetchFailure = nil
+            lastCodexRecoveryHint = nil
+            isCodexAuthExpired = false
+        }
+        scheduleStaleDisplayCheck()
+        updateTitle()
+        rebuildMenu()
+    }
+
     @objc private func toggleMenuBarIconDisplayAction() {
         config = config.withMenuBarUsesIcons(!config.menuBarUsesIcons)
         config.save()
@@ -680,6 +774,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     }
 
     @objc private func resetCodexUsageAction() {
+        guard config.codexEnabled, !isResettingCodexUsage else { return }
         let count = latestCodex?.rateLimitResetCreditsAvailable ?? 0
         guard count > 0 else { return }
 
@@ -794,6 +889,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 peakRefreshEndHour: peakEndTime.hour,
                 peakRefreshEndMinute: peakEndTime.minute,
                 autoRefreshTimeZone: config.autoRefreshTimeZone,
+                claudeEnabled: config.claudeEnabled,
+                codexEnabled: config.codexEnabled,
                 menuBarUsesIcons: config.menuBarUsesIcons,
                 allowBackgroundClaudeAuthRefresh: config.allowBackgroundClaudeAuthRefresh,
                 selectedClaudeMenuBarTrackLabel: config.selectedClaudeMenuBarTrackLabel,
@@ -850,6 +947,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     }
 
     private func refreshClaude(isAutomatic: Bool = false, forceRejectedTokenRetry: Bool = false) {
+        guard config.claudeEnabled, !isLoadingClaude else { return }
         if isAutomatic && !isInAutoRefreshWindow() {
             latestError = "自動更新は JST \(config.autoRefreshWindowLabel) のみ"
             // 仕様通りの休止であって取得ではない。`lastClaudeFetchFailure` は
@@ -871,14 +969,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             ? .userInitiated
             : (config.allowBackgroundClaudeAuthRefresh ? .background : .disabled)
 
-        Task { [weak self] in
+        claudeRefreshTask = Task { [weak self] in
             guard let self = self else { return }
             do {
+                try Task.checkCancellation()
                 let snap = try await self.fetcher.fetchUsage(
                     forceRejectedTokenRetry: forceRejectedTokenRetry,
                     authRefreshInteraction: authRefreshInteraction
                 )
                 await MainActor.run {
+                    // オフ→オンの後に、キャンセル前の取得結果が届いても反映しない。
+                    guard !Task.isCancelled, self.config.claudeEnabled else { return }
+                    self.claudeRefreshTask = nil
                     self.latest = snap
                     self.latestError = nil
                     self.lastClaudeFetchFailure = nil
@@ -892,6 +994,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 }
             } catch {
                 await MainActor.run {
+                    guard !Task.isCancelled, self.config.claudeEnabled else { return }
+                    self.claudeRefreshTask = nil
                     let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
                     self.latestError = message
                     self.lastClaudeFetchFailure = message
@@ -907,6 +1011,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     }
 
     private func refreshCodex(isAutomatic: Bool = false, forceRejectedTokenRetry: Bool = false) {
+        guard config.codexEnabled, !isLoadingCodex else { return }
         if isAutomatic && !isInAutoRefreshWindow() {
             latestCodexError = "自動更新は JST \(config.autoRefreshWindowLabel) のみ"
             isLoadingCodex = false
@@ -921,11 +1026,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         updateTitle()
         rebuildMenu()
 
-        Task { [weak self] in
+        codexRefreshTask = Task { [weak self] in
             guard let self = self else { return }
             do {
+                try Task.checkCancellation()
                 let snap = try await self.codexFetcher.fetchUsage(forceRejectedTokenRetry: forceRejectedTokenRetry)
                 await MainActor.run {
+                    // オフ→オンの後に、キャンセル前の取得結果が届いても反映しない。
+                    guard !Task.isCancelled, self.config.codexEnabled else { return }
+                    self.codexRefreshTask = nil
                     self.latestCodex = snap
                     self.latestCodexError = nil
                     self.lastCodexFetchFailure = nil
@@ -939,6 +1048,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 }
             } catch {
                 await MainActor.run {
+                    guard !Task.isCancelled, self.config.codexEnabled else { return }
+                    self.codexRefreshTask = nil
                     let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
                     self.latestCodexError = message
                     self.lastCodexFetchFailure = message
@@ -955,6 +1066,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
     private func scheduleNextClaudeAutoRefresh() {
         claudeTimer?.invalidate()
+        claudeTimer = nil
+        nextClaudeAutoRefreshAt = nil
+        guard config.claudeEnabled else { return }
 
         let now = Date()
         let next: Date
@@ -975,6 +1089,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
     private func scheduleNextCodexAutoRefresh() {
         codexTimer?.invalidate()
+        codexTimer = nil
+        nextCodexAutoRefreshAt = nil
+        guard config.codexEnabled else { return }
 
         let now = Date()
         let next: Date
@@ -1001,8 +1118,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         staleDisplayTimer?.invalidate()
         staleDisplayTimer = nil
 
-        let resets = (latest?.tracks.compactMap(\.resetsAt) ?? [])
-            + (latestCodex?.tracks.compactMap(\.resetsAt) ?? [])
+        let resets = (config.claudeEnabled ? latest?.tracks.compactMap(\.resetsAt) ?? [] : [])
+            + (config.codexEnabled ? latestCodex?.tracks.compactMap(\.resetsAt) ?? [] : [])
         // まだ来ていないリセットのうち一番早いもの。
         // 過ぎたものは既に `staleReason` が拾っているので対象外。
         guard let next = resets.filter({ $0 > Date() }).min() else { return }
@@ -1171,22 +1288,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         completion: @escaping (Bool) -> Void
     ) {
         ensureNotificationAuthorization { [weak self] granted in
-            guard granted else {
-                DispatchQueue.main.async {
-                    self?.showNotificationPermissionAlert()
+            DispatchQueue.main.async {
+                guard let self,
+                      service == "Claude" ? self.config.claudeEnabled : self.config.codexEnabled else {
                     completion(false)
+                    return
                 }
-                return
-            }
+                guard granted else {
+                    self.showNotificationPermissionAlert()
+                    completion(false)
+                    return
+                }
 
-            self?.enqueueWeeklyLimitNotification(
-                service: service,
-                label: label,
-                threshold: threshold,
-                remainingPercent: remainingPercent,
-                resetTimeString: resetTimeString,
-                completion: completion
-            )
+                self.enqueueWeeklyLimitNotification(
+                    service: service,
+                    label: label,
+                    threshold: threshold,
+                    remainingPercent: remainingPercent,
+                    resetTimeString: resetTimeString,
+                    completion: completion
+                )
+            }
         }
     }
 

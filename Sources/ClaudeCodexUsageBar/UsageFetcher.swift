@@ -70,6 +70,7 @@ final class UsageFetcher {
         forceRejectedTokenRetry: Bool = false,
         authRefreshInteraction: ClaudeAuthRefreshInteraction = .disabled
     ) async throws -> UsageSnapshot {
+        try Task.checkCancellation()
         if forceRejectedTokenRetry {
             cachedClaudeOAuthCredentials = nil
         }
@@ -119,6 +120,7 @@ final class UsageFetcher {
     /// 利用量を取得し、401 だったトークンを覚える。API 呼び出しは必ずここを通す。
     /// 拒否済みマークの解除は「200 が返った時点」で `fetchOAuthUsage` が行う。
     private func requestUsage(credentials: ClaudeOAuthCredentials) async throws -> UsageSnapshot {
+        try Task.checkCancellation()
         do {
             return try await fetchOAuthUsage(credentials: credentials)
         } catch FetchError.unauthorized {
@@ -136,6 +138,7 @@ final class UsageFetcher {
         interaction: ClaudeAuthRefreshInteraction,
         fallbackError: FetchError
     ) async throws -> UsageSnapshot {
+        try Task.checkCancellation()
         guard interaction != .disabled else { throw fallbackError }
 
         let outcome = await ClaudeOAuthDelegatedRefreshCoordinator.shared.refresh(
@@ -143,6 +146,7 @@ final class UsageFetcher {
             interaction: interaction
         )
 
+        try Task.checkCancellation()
         switch outcome {
         case .refreshed(let credentials):
             cachedClaudeOAuthCredentials = credentials
