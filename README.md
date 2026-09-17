@@ -78,6 +78,30 @@ Codex は従来どおり直接更新せず、Codex CLI が更新した `~/.codex
 
 ## アプリの起動
 
+### Homebrew でインストール（推奨）
+
+通常は [Homebrew tap](https://github.com/shutoinagaki01-agoop/homebrew-tap) からのインストールをおすすめします。Homebrew を導入済みの環境で、次を実行してください。
+
+```bash
+brew tap shutoinagaki01-agoop/tap
+brew trust --tap shutoinagaki01-agoop/tap
+brew install --cask shutoinagaki01-agoop/tap/claude-codex-usage-bar
+open -a ClaudeCodexUsageBar
+```
+
+インストール後も、利用するサービスのログイン・初回セットアップが必要です。手順は [事前準備](#事前準備) を参照してください。macOS に起動をブロックされた場合の対処は、[Homebrew tap のインストール案内](https://github.com/shutoinagaki01-agoop/homebrew-tap#インストール) に記載しています。
+
+更新する場合は、次を実行してください。
+
+```bash
+brew update
+brew upgrade --cask shutoinagaki01-agoop/tap/claude-codex-usage-bar
+```
+
+### ソースからビルドする場合
+
+開発やソースコードを変更して利用する場合は、次の手順でビルドできます。
+
 ```bash
 git clone https://github.com/shutoinagaki01-agoop/ClaudeCodexUsageBar.git # もしくは GitHub の Code > Download ZIP からダウンロード
 cd ClaudeCodexUsageBar  # アプリの置き場所に移動
