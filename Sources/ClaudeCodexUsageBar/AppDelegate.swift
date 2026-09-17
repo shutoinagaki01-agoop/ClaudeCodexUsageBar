@@ -338,9 +338,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             let staleReason = claudeStaleReason
             let staleMark = staleReason == nil ? "" : "\(Self.staleMarker) "
             setMenuBarTitle("\(claudeTextLabel)\(claudeTitleLabelPart(for: headerTrack)) \(staleMark)\(headerTrack.remainingPercent)%\(resetSuffix)\(codexPart)")
-            var claudeTip = sorted.map { "\($0.label): 残り \($0.remainingPercent)%, リセット \($0.resetTimeString)" }
-                .joined(separator: "\n")
-                + "\n更新: \(formatFetchedAt(snap.fetchedAt))"
+            let lines = sorted.map { "\($0.label): 残り \($0.remainingPercent)%, リセット \($0.resetTimeString)" }
+            var claudeTip = (["Claude plan: \(snap.plan ?? "不明")"] + lines
+                + ["更新: \(formatFetchedAt(snap.fetchedAt))"]).joined(separator: "\n")
             if let staleReason {
                 claudeTip += "\n\(Self.staleMarker) 最新ではありません: \(staleReason)"
                 if let hint = lastClaudeRecoveryHint {
@@ -368,14 +368,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         guard let button = statusItem.button else { return }
         button.image = nil
 
-        guard config.menuBarUsesIcons else {
-            button.attributedTitle = NSAttributedString()
-            button.title = title
-            return
+        let output = NSMutableAttributedString(attributedString: config.menuBarUsesIcons
+            ? iconMenuBarTitle(from: title)
+            : NSAttributedString(string: title))
+        let font = button.font ?? NSFont.systemFont(ofSize: NSFont.systemFontSize)
+        let fullRange = NSRange(location: 0, length: output.length)
+        output.addAttribute(.font, value: font, range: fullRange)
+
+        // 枠のラベルだけを小さくし、残量やリセット時刻の読みやすさを保つ。
+        let trackFont = NSFont.systemFont(ofSize: max(9, font.pointSize - 2))
+        let pattern = #"\b(?:5h|7d)\b"#
+        if let regex = try? NSRegularExpression(pattern: pattern) {
+            for match in regex.matches(in: output.string, range: fullRange) {
+                output.addAttributes([.font: trackFont, .baselineOffset: 1], range: match.range)
+            }
         }
 
         button.title = ""
-        button.attributedTitle = iconMenuBarTitle(from: title)
+        button.attributedTitle = output
     }
 
     private func iconMenuBarTitle(from title: String) -> NSAttributedString {
@@ -593,9 +603,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         guard config.codexEnabled else { return "" }
         if let codex = latestCodex, !codex.tracks.isEmpty {
             let lines = codex.tracks.map {
-                "Codex \($0.label): 残り \($0.remainingPercent)%, リセット \($0.resetTimeString)"
+                "\($0.label): 残り \($0.remainingPercent)%, リセット \($0.resetTimeString)"
             }
-            var parts = ["Codex plan: \(codex.plan)"] + lines + ["Codex 更新: \(formatFetchedAt(codex.fetchedAt))"]
+            var parts = ["Codex plan: \(codex.plan)"] + lines + ["更新: \(formatFetchedAt(codex.fetchedAt))"]
             if let staleReason = codexStaleReason {
                 parts.append("\(Self.staleMarker) 最新ではありません: \(staleReason)")
                 if let hint = lastCodexRecoveryHint {
