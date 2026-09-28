@@ -17,12 +17,12 @@ struct AppConfig {
     let autoRefreshTimeZone: TimeZone
     var claudeEnabled: Bool
     var codexEnabled: Bool
-    let menuBarUsesIcons: Bool
+    var menuBarShowsTrackLabels: Bool
     /// 認証切れ時に、定期更新から公式 Claude CLI を PTY 起動してよいか。
     /// 手動更新はこの設定にかかわらずユーザ操作として許可される。
     let allowBackgroundClaudeAuthRefresh: Bool
-    let selectedClaudeMenuBarTrackLabel: String?
-    let selectedCodexMenuBarTrackLabel: String?
+    let selectedClaudeMenuBarTrackLabels: [String]
+    let selectedCodexMenuBarTrackLabels: [String]
 
     /// 認証切れを検出している間の自動更新間隔。
     ///
@@ -52,13 +52,13 @@ struct AppConfig {
             autoRefreshTimeZone: TimeZone(identifier: "Asia/Tokyo")!,
             claudeEnabled: defaults.bool(forKey: Keys.claudeEnabled, default: true),
             codexEnabled: defaults.bool(forKey: Keys.codexEnabled, default: true),
-            menuBarUsesIcons: defaults.bool(forKey: Keys.menuBarUsesIcons, default: true),
+            menuBarShowsTrackLabels: defaults.bool(forKey: Keys.menuBarShowsTrackLabels, default: false),
             allowBackgroundClaudeAuthRefresh: defaults.bool(
                 forKey: Keys.allowBackgroundClaudeAuthRefresh,
-                default: false
+                default: true
             ),
-            selectedClaudeMenuBarTrackLabel: defaults.string(forKey: Keys.selectedClaudeMenuBarTrackLabel),
-            selectedCodexMenuBarTrackLabel: defaults.string(forKey: Keys.selectedCodexMenuBarTrackLabel)
+            selectedClaudeMenuBarTrackLabels: Self.loadTrackLabels(defaults: defaults, key: Keys.selectedClaudeMenuBarTrackLabels, legacyKey: "settings.selectedClaudeMenuBarTrackLabel", defaultLabels: ["5h", "7d"]),
+            selectedCodexMenuBarTrackLabels: Self.loadTrackLabels(defaults: defaults, key: Keys.selectedCodexMenuBarTrackLabels, legacyKey: "settings.selectedCodexMenuBarTrackLabel")
         )
     }
 
@@ -75,13 +75,13 @@ struct AppConfig {
         defaults.set(peakRefreshStartMinute, forKey: Keys.peakRefreshStartMinute)
         defaults.set(peakRefreshEndHour, forKey: Keys.peakRefreshEndHour)
         defaults.set(peakRefreshEndMinute, forKey: Keys.peakRefreshEndMinute)
-        defaults.set(menuBarUsesIcons, forKey: Keys.menuBarUsesIcons)
+        defaults.set(menuBarShowsTrackLabels, forKey: Keys.menuBarShowsTrackLabels)
         defaults.set(allowBackgroundClaudeAuthRefresh, forKey: Keys.allowBackgroundClaudeAuthRefresh)
-        saveOptional(selectedClaudeMenuBarTrackLabel, key: Keys.selectedClaudeMenuBarTrackLabel, defaults: defaults)
-        saveOptional(selectedCodexMenuBarTrackLabel, key: Keys.selectedCodexMenuBarTrackLabel, defaults: defaults)
+        defaults.set(MenuBarTrackSelection.normalized(selectedClaudeMenuBarTrackLabels), forKey: Keys.selectedClaudeMenuBarTrackLabels)
+        defaults.set(MenuBarTrackSelection.normalized(selectedCodexMenuBarTrackLabels), forKey: Keys.selectedCodexMenuBarTrackLabels)
     }
 
-    func withMenuBarUsesIcons(_ enabled: Bool) -> AppConfig {
+    func withSelectedClaudeMenuBarTrackLabels(_ labels: [String]) -> AppConfig {
         AppConfig(
             peakRefreshInterval: peakRefreshInterval,
             normalRefreshInterval: normalRefreshInterval,
@@ -98,14 +98,14 @@ struct AppConfig {
             autoRefreshTimeZone: autoRefreshTimeZone,
             claudeEnabled: claudeEnabled,
             codexEnabled: codexEnabled,
-            menuBarUsesIcons: enabled,
+            menuBarShowsTrackLabels: menuBarShowsTrackLabels,
             allowBackgroundClaudeAuthRefresh: allowBackgroundClaudeAuthRefresh,
-            selectedClaudeMenuBarTrackLabel: selectedClaudeMenuBarTrackLabel,
-            selectedCodexMenuBarTrackLabel: selectedCodexMenuBarTrackLabel
+            selectedClaudeMenuBarTrackLabels: MenuBarTrackSelection.normalized(labels),
+            selectedCodexMenuBarTrackLabels: selectedCodexMenuBarTrackLabels
         )
     }
 
-    func withSelectedClaudeMenuBarTrackLabel(_ label: String?) -> AppConfig {
+    func withSelectedCodexMenuBarTrackLabels(_ labels: [String]) -> AppConfig {
         AppConfig(
             peakRefreshInterval: peakRefreshInterval,
             normalRefreshInterval: normalRefreshInterval,
@@ -122,34 +122,10 @@ struct AppConfig {
             autoRefreshTimeZone: autoRefreshTimeZone,
             claudeEnabled: claudeEnabled,
             codexEnabled: codexEnabled,
-            menuBarUsesIcons: menuBarUsesIcons,
+            menuBarShowsTrackLabels: menuBarShowsTrackLabels,
             allowBackgroundClaudeAuthRefresh: allowBackgroundClaudeAuthRefresh,
-            selectedClaudeMenuBarTrackLabel: label,
-            selectedCodexMenuBarTrackLabel: selectedCodexMenuBarTrackLabel
-        )
-    }
-
-    func withSelectedCodexMenuBarTrackLabel(_ label: String?) -> AppConfig {
-        AppConfig(
-            peakRefreshInterval: peakRefreshInterval,
-            normalRefreshInterval: normalRefreshInterval,
-            depletedFallbackRefreshInterval: depletedFallbackRefreshInterval,
-            resetRefreshBuffer: resetRefreshBuffer,
-            autoRefreshStartHour: autoRefreshStartHour,
-            autoRefreshStartMinute: autoRefreshStartMinute,
-            autoRefreshEndHour: autoRefreshEndHour,
-            autoRefreshEndMinute: autoRefreshEndMinute,
-            peakRefreshStartHour: peakRefreshStartHour,
-            peakRefreshStartMinute: peakRefreshStartMinute,
-            peakRefreshEndHour: peakRefreshEndHour,
-            peakRefreshEndMinute: peakRefreshEndMinute,
-            autoRefreshTimeZone: autoRefreshTimeZone,
-            claudeEnabled: claudeEnabled,
-            codexEnabled: codexEnabled,
-            menuBarUsesIcons: menuBarUsesIcons,
-            allowBackgroundClaudeAuthRefresh: allowBackgroundClaudeAuthRefresh,
-            selectedClaudeMenuBarTrackLabel: selectedClaudeMenuBarTrackLabel,
-            selectedCodexMenuBarTrackLabel: label
+            selectedClaudeMenuBarTrackLabels: selectedClaudeMenuBarTrackLabels,
+            selectedCodexMenuBarTrackLabels: MenuBarTrackSelection.normalized(labels)
         )
     }
 
@@ -170,10 +146,10 @@ struct AppConfig {
             autoRefreshTimeZone: autoRefreshTimeZone,
             claudeEnabled: claudeEnabled,
             codexEnabled: codexEnabled,
-            menuBarUsesIcons: menuBarUsesIcons,
+            menuBarShowsTrackLabels: menuBarShowsTrackLabels,
             allowBackgroundClaudeAuthRefresh: enabled,
-            selectedClaudeMenuBarTrackLabel: selectedClaudeMenuBarTrackLabel,
-            selectedCodexMenuBarTrackLabel: selectedCodexMenuBarTrackLabel
+            selectedClaudeMenuBarTrackLabels: selectedClaudeMenuBarTrackLabels,
+            selectedCodexMenuBarTrackLabels: selectedCodexMenuBarTrackLabels
         )
     }
 
@@ -206,19 +182,19 @@ struct AppConfig {
         static let peakRefreshEndMinute = "settings.peakRefreshEndMinute"
         static let claudeEnabled = "settings.claudeEnabled"
         static let codexEnabled = "settings.codexEnabled"
-        static let menuBarUsesIcons = "settings.menuBarUsesIcons"
+        static let menuBarShowsTrackLabels = "settings.menuBarShowsTrackLabels"
         static let allowBackgroundClaudeAuthRefresh = "settings.allowBackgroundClaudeAuthRefresh"
-        static let selectedClaudeMenuBarTrackLabel = "settings.selectedClaudeMenuBarTrackLabel"
-        static let selectedCodexMenuBarTrackLabel = "settings.selectedCodexMenuBarTrackLabel"
+        static let selectedClaudeMenuBarTrackLabels = "settings.selectedClaudeMenuBarTrackLabels"
+        static let selectedCodexMenuBarTrackLabels = "settings.selectedCodexMenuBarTrackLabels"
     }
 
-    private func saveOptional(_ value: String?, key: String, defaults: UserDefaults) {
-        if let value, !value.isEmpty {
-            defaults.set(value, forKey: key)
-        } else {
-            defaults.removeObject(forKey: key)
-        }
+    private static func loadTrackLabels(defaults: UserDefaults, key: String, legacyKey: String, defaultLabels: [String] = []) -> [String] {
+        let labels = defaults.stringArray(forKey: key)
+            ?? defaults.string(forKey: legacyKey).map { [$0] }
+            ?? defaultLabels
+        return MenuBarTrackSelection.normalized(labels)
     }
+
 }
 
 private extension UserDefaults {
@@ -232,5 +208,34 @@ private extension UserDefaults {
 
     func bool(forKey key: String, default defaultValue: Bool) -> Bool {
         object(forKey: key) == nil ? defaultValue : bool(forKey: key)
+    }
+}
+
+/// 空の保存値は既定の枠を意味する。表示・操作には現在取得できた枠を使う。
+enum MenuBarTrackSelection {
+    static func normalized(_ labels: [String]) -> [String] {
+        var result: [String] = []
+        for label in labels where !label.isEmpty && !result.contains(label) {
+            result.append(label)
+        }
+        return Array(result.prefix(2))
+    }
+
+    static func resolved(_ selected: [String], available: [String]) -> [String] {
+        let selected = normalized(selected)
+        let matches = available.filter { selected.contains($0) }
+        if !matches.isEmpty { return Array(matches.prefix(2)) }
+        return (available.first(where: { $0 == "5h" })
+            ?? available.first(where: { $0 == "7d" })
+            ?? available.first).map { [$0] } ?? []
+    }
+
+    static func canToggle(_ label: String, selected: [String]) -> Bool {
+        selected.contains(label) ? selected.count > 1 : selected.count < 2
+    }
+
+    static func toggling(_ label: String, selected: [String]) -> [String] {
+        guard canToggle(label, selected: selected) else { return selected }
+        return selected.contains(label) ? selected.filter { $0 != label } : selected + [label]
     }
 }

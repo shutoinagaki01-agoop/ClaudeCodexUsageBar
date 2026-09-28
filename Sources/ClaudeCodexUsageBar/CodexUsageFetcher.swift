@@ -169,7 +169,7 @@ final class CodexUsageFetcher {
         switch http.statusCode {
         case 200..<300:
             return data
-        // 403 は権限・プラン起因なので認証拒否として扱わない（default の HTTP エラーへ）。
+        // 403 だけでは認証切れと判断できないため、通常の HTTP エラーとして扱う。
         case 401:
             throw FetchError.unauthorized
         default:
@@ -223,7 +223,7 @@ final class CodexUsageFetcher {
         switch http.statusCode {
         case 200..<300:
             break
-        // 403 は権限・プラン起因なので認証拒否として扱わない（default の HTTP エラーへ）。
+        // 403 だけでは認証切れと判断できないため、通常の HTTP エラーとして扱う。
         case 401:
             throw FetchError.unauthorized
         default:
@@ -284,7 +284,7 @@ final class CodexUsageFetcher {
                 throw FetchError.decodeFailed("Codex reset was not applied: \(outcome)")
             }
             return
-        // 403 は権限・プラン起因なので認証拒否として扱わない（default の HTTP エラーへ）。
+        // 403 だけでは認証切れと判断できないため、通常の HTTP エラーとして扱う。
         case 401:
             throw FetchError.unauthorized
         default:

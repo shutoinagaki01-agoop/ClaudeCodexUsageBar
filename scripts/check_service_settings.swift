@@ -14,9 +14,10 @@ struct ServiceSettingsChecks {
         defer { defaults.removePersistentDomain(forName: suiteName) }
         let checks = Self(defaults: defaults, suiteName: suiteName)
         checks.testExistingSettingsKeepBothServicesEnabled()
+        checks.testBackgroundAuthDefaultAndSavedChoices()
         checks.testAllServiceCombinationsSurviveReload()
         checks.testChangingOtherPreferencesPreservesServiceSelection()
-        print("PASS: defaults, all four service combinations, and preservation across preference changes")
+        print("PASS: defaults, background auth default and saved choices, all four service combinations, and preservation across preference changes")
     }
 
     func testExistingSettingsKeepBothServicesEnabled() {
@@ -27,8 +28,18 @@ struct ServiceSettingsChecks {
 
         precondition(config.claudeEnabled)
         precondition(config.codexEnabled)
-        precondition(!config.menuBarUsesIcons)
         precondition(config.normalRefreshInterval == 420)
+    }
+
+    func testBackgroundAuthDefaultAndSavedChoices() {
+        precondition(AppConfig.load(defaults: defaults).allowBackgroundClaudeAuthRefresh)
+        for enabled in [false, true] {
+            AppConfig.load(defaults: defaults)
+                .withAllowBackgroundClaudeAuthRefresh(enabled)
+                .save(defaults: defaults)
+            let reloaded = AppConfig.load(defaults: UserDefaults(suiteName: suiteName)!)
+            precondition(reloaded.allowBackgroundClaudeAuthRefresh == enabled)
+        }
     }
 
     func testAllServiceCombinationsSurviveReload() {
@@ -53,19 +64,17 @@ struct ServiceSettingsChecks {
                 config.claudeEnabled = claude
                 config.codexEnabled = codex
                 let changed = config
-                    .withMenuBarUsesIcons(false)
                     .withAllowBackgroundClaudeAuthRefresh(true)
-                    .withSelectedClaudeMenuBarTrackLabel("7d")
-                    .withSelectedCodexMenuBarTrackLabel("7d")
+                    .withSelectedClaudeMenuBarTrackLabels(["5h", "7d"])
+                    .withSelectedCodexMenuBarTrackLabels(["5h", "7d"])
                 changed.save(defaults: defaults)
 
                 let reloaded = AppConfig.load(defaults: defaults)
                 precondition(reloaded.claudeEnabled == claude)
                 precondition(reloaded.codexEnabled == codex)
-                precondition(!reloaded.menuBarUsesIcons)
                 precondition(reloaded.allowBackgroundClaudeAuthRefresh)
-                precondition(reloaded.selectedClaudeMenuBarTrackLabel == "7d")
-                precondition(reloaded.selectedCodexMenuBarTrackLabel == "7d")
+                precondition(reloaded.selectedClaudeMenuBarTrackLabels == ["5h", "7d"])
+                precondition(reloaded.selectedCodexMenuBarTrackLabels == ["5h", "7d"])
             }
         }
     }

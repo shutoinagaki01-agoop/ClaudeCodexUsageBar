@@ -231,7 +231,7 @@ final class UsageFetcher {
             switch http.statusCode {
             case 200..<300:
                 return data
-            // 403 は権限・エンタイトルメント起因なので認証拒否として扱わない。
+            // 403 だけでは認証切れと判断できないため、通常の HTTP エラーとして扱う。
             // 拒否済みマークを付けても再読込では復帰しないため、default の HTTP エラーに落とす。
             case 401:
                 throw FetchError.unauthorized

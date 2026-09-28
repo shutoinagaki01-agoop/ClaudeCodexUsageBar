@@ -4,7 +4,7 @@ import Foundation
 /// 公式 Claude CLI の起動を許可する呼び出し種別。
 ///
 /// 手動更新はユーザ操作そのものなので常に許可する。バックグラウンド起動は、
-/// Keychain の認可 UI が突然出る可能性があるため設定で明示的に許可された時だけ使う。
+/// 設定がオンの時だけ使う（既定オン）。Keychain の認可 UI が出る可能性がある。
 enum ClaudeAuthRefreshInteraction: Sendable {
     case disabled
     case background

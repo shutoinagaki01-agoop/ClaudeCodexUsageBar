@@ -152,7 +152,7 @@ enum FetchError: LocalizedError {
     case missingClaudeOAuthCredentials
     /// HTTP 401 を表す内部シグナル。認証情報の再読込を促すために使う。
     ///
-    /// 403 はここに含めない。403 は権限・プラン起因で、トークンを読み直しても復帰せず、
+    /// 403 はここに含めない。権限・プランや通信経路のアクセス制限などでも発生するため、
     /// 拒否済みトークンとして記録すると無関係な取得まで止めてしまう。`.http` として扱う。
     ///
     /// Claude / Codex 共通の型なので、これが UI まで漏れるとサービス名を誤って表示する。
@@ -190,7 +190,17 @@ enum FetchError: LocalizedError {
         case .decodeFailed(let m): return "レスポンス解析失敗: \(m)"
         case .network(let e): return "通信エラー: \(e.localizedDescription)"
         case .http(let code, let body):
-            let snippet = body.prefix(120)
+            // HTML のタグ・CSS や改行を NSMenuItem に渡すとメニューの表示が崩れる。
+            // エラーページの文言から、認証切れや特定の拒否元を断定しない。
+            if body.range(of: #"<\s*(?:!|/?[a-z])"#, options: [.regularExpression, .caseInsensitive]) != nil {
+                return code == 403
+                    ? "HTTP 403: アクセスが拒否されました（HTML 応答）。"
+                    : "HTTP \(code): サーバーから HTML のエラー応答が返されました。"
+            }
+            let text = body.components(separatedBy: .whitespacesAndNewlines)
+                .filter { !$0.isEmpty }.joined(separator: " ")
+            guard !text.isEmpty else { return "HTTP \(code)" }
+            let snippet = String(text.prefix(120)) + (text.count > 120 ? "…" : "")
             return "HTTP \(code): \(snippet)"
         }
     }
@@ -229,6 +239,8 @@ enum FetchError: LocalizedError {
             return "復帰方法: ターミナルで `claude` を起動し、表示された案内を確認してください。"
         case .codexAuthExpired:
             return "復帰方法: ターミナルで `codex` を起動してください。直らなければ `codex login`。"
+        case .http(403, _):
+            return "対処: 少し待って手動更新。続く場合は公式アプリや VPN・プロキシの設定を確認してください。"
         case .decodeFailed, .network, .http:
             return nil
         }
