@@ -27,8 +27,8 @@ import Foundation
 /// このクライアント自身は Claude Code の認証情報を **読むだけ** で、リフレッシュも保存もしない。
 /// 自前でリフレッシュすると、サーバがリフレッシュトークンをローテーションした場合に
 /// Claude Code 側に古いトークンが残り、Claude Code をログアウトさせ得る。
-/// 期限切れ時は、許可された場合に限り公式 `claude` を PTY で起動して `/status` を送り、
-/// Claude Code 自身に更新させる。認証情報が実際に変わったことを確認してから再試行する。
+/// 期限切れ時は、許可された場合に限り公式 `claude -p /usage` を起動し、
+/// 自然終了まで待つ。認証情報が実際に変わったことを確認してから再試行する。
 final class UsageFetcher {
 
     private let session: URLSession
@@ -163,8 +163,8 @@ final class UsageFetcher {
             throw FetchError.claudeCLISetupRequired
         case .loginRequired:
             throw FetchError.claudeLoginRequired
-        case .manualInteractionRequired:
-            throw FetchError.claudeCLIInteractionRequired
+        case .inProgress:
+            throw FetchError.claudeAuthRefreshInProgress
         case .failed(let message):
             throw FetchError.claudeAuthRefreshFailed(message)
         }

@@ -163,12 +163,12 @@ enum FetchError: LocalizedError {
     case claudeAuthExpired
     /// 公式 Claude CLI への委譲は試みたが、有効な認証情報へ更新できなかった状態。
     case claudeAuthRefreshFailed(String)
+    /// CLI は引き続き実行中。UI だけ待機を終了し、次回取得時に状態を再確認する。
+    case claudeAuthRefreshInProgress
     /// Claude Desktop の利用とは別に、Claude CLI 自身の初回セットアップが必要な状態。
     case claudeCLISetupRequired
     /// refresh token の失効・取り消しなどにより、ユーザ自身の再ログインが必要な状態。
     case claudeLoginRequired
-    /// 安全に自動応答できない対話画面が表示され、ターミナルでの確認が必要な状態。
-    case claudeCLIInteractionRequired
     case codexAuthExpired
     case decodeFailed(String)
     case network(Error)
@@ -180,12 +180,12 @@ enum FetchError: LocalizedError {
         case .unauthorized: return "Auth rejected (HTTP 401)."
         case .claudeAuthExpired: return "Claude auth expired. Use manual refresh, or run `claude auth login`."
         case .claudeAuthRefreshFailed(let m): return "Claude CLI auth refresh failed: \(m)"
+        case .claudeAuthRefreshInProgress:
+            return "Claude CLI の認証更新を待っています。次回の取得時に再確認します。"
         case .claudeCLISetupRequired:
             return "Claude CLI setup required. Run `claude` once in Terminal and complete the setup."
         case .claudeLoginRequired:
             return "Claude login required. Run `claude auth login` in Terminal."
-        case .claudeCLIInteractionRequired:
-            return "Claude CLI needs interactive attention. Run `claude` in Terminal and follow its instructions."
         case .codexAuthExpired: return "Codex auth expired. Run `codex login` again."
         case .decodeFailed(let m): return "レスポンス解析失敗: \(m)"
         case .network(let e): return "通信エラー: \(e.localizedDescription)"
@@ -210,10 +210,10 @@ enum FetchError: LocalizedError {
     var isAuthExpired: Bool {
         switch self {
         case .claudeAuthExpired, .claudeAuthRefreshFailed, .claudeCLISetupRequired,
-             .claudeLoginRequired, .claudeCLIInteractionRequired, .codexAuthExpired,
+             .claudeLoginRequired, .codexAuthExpired,
              .missingClaudeOAuthCredentials, .unauthorized:
             return true
-        case .decodeFailed, .network, .http:
+        case .claudeAuthRefreshInProgress, .decodeFailed, .network, .http:
             return false
         }
     }
@@ -235,13 +235,11 @@ enum FetchError: LocalizedError {
             return "復帰方法: ターミナルで `claude` を一度起動し、初回設定を完了してください。"
         case .claudeLoginRequired:
             return "復帰方法: ターミナルで `claude auth login` を実行してください。"
-        case .claudeCLIInteractionRequired:
-            return "復帰方法: ターミナルで `claude` を起動し、表示された案内を確認してください。"
         case .codexAuthExpired:
             return "復帰方法: ターミナルで `codex` を起動してください。直らなければ `codex login`。"
         case .http(403, _):
             return "対処: 少し待って手動更新。続く場合は公式アプリや VPN・プロキシの設定を確認してください。"
-        case .decodeFailed, .network, .http:
+        case .claudeAuthRefreshInProgress, .decodeFailed, .network, .http:
             return nil
         }
     }

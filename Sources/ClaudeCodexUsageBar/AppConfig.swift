@@ -18,7 +18,7 @@ struct AppConfig {
     var claudeEnabled: Bool
     var codexEnabled: Bool
     var menuBarShowsTrackLabels: Bool
-    /// 認証切れ時に、定期更新から公式 Claude CLI を PTY 起動してよいか。
+    /// 認証切れ時に、定期更新から公式 Claude CLI の非対話 /usage を起動してよいか。
     /// 手動更新はこの設定にかかわらずユーザ操作として許可される。
     let allowBackgroundClaudeAuthRefresh: Bool
     let selectedClaudeMenuBarTrackLabels: [String]

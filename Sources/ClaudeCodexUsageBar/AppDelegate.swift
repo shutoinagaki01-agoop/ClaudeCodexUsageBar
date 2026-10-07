@@ -302,7 +302,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             )
             backgroundClaudeAuth.target = self
             backgroundClaudeAuth.state = config.allowBackgroundClaudeAuthRefresh ? .on : .off
-            backgroundClaudeAuth.toolTip = "認証切れ時に公式Claude CLIをPTY起動します。Keychainの確認が表示される場合があります。"
+            backgroundClaudeAuth.toolTip = "認証切れ時に公式Claude CLIで使用量を確認し、自然終了まで待ちます。更新途中の強制終了は行いません。"
             submenu.addItem(backgroundClaudeAuth)
         }
         if config.claudeEnabled || config.codexEnabled {

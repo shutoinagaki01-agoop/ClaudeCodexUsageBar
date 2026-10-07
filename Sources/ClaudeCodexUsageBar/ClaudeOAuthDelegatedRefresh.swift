@@ -1,10 +1,9 @@
-import Darwin
 import Foundation
 
 /// 公式 Claude CLI の起動を許可する呼び出し種別。
 ///
 /// 手動更新はユーザ操作そのものなので常に許可する。バックグラウンド起動は、
-/// 設定がオンの時だけ使う（既定オン）。Keychain の認可 UI が出る可能性がある。
+/// 設定がオンの時だけ使う（既定オン）。開始した CLI は自然終了まで待つ。
 enum ClaudeAuthRefreshInteraction: Sendable {
     case disabled
     case background
@@ -18,7 +17,7 @@ enum ClaudeCLIOnboardingState: Sendable, Equatable {
 }
 
 /// Claude CLI が初回セットアップ済みかを、Claude 所有の設定ファイルから読み取り専用で確認する。
-/// 未完了のウィザードへ `/status` や Enter を送ると、意図しない選択を確定しかねない。
+/// 初回セットアップをアプリから開始しないため、非対話 CLI の起動前にも確認する。
 enum ClaudeCLIOnboardingProbe {
     static func state(
         environment: [String: String] = ProcessInfo.processInfo.environment,
@@ -173,7 +172,7 @@ actor ClaudeOAuthDelegatedRefreshCoordinator {
         case cliUnavailable
         case onboardingRequired
         case loginRequired
-        case manualInteractionRequired
+        case inProgress
         case failed(String)
 
         var wasRefreshed: Bool {
@@ -203,14 +202,9 @@ actor ClaudeOAuthDelegatedRefreshCoordinator {
 
         if let current = inFlight {
             let retryAsUser = interaction == .userInitiated && current.interaction != .userInitiated
-            let joined = await current.task.value
+            let joined = await waitForResult(current)
+            if case .inProgress = joined { return joined }
             if retryAsUser, !joined.wasRefreshed {
-                // 完了済み task を保持したまま再帰すると、元の呼び出し側が clear する前に
-                // 同じ task へ再 join し続ける。ID が同じ時だけここで引き取って解放する。
-                if inFlight?.id == current.id {
-                    inFlight = nil
-                    cooldown = failureCooldown
-                }
                 return await refresh(previousCredentials: previousCredentials, interaction: interaction)
             }
             return joined
@@ -233,16 +227,38 @@ actor ClaudeOAuthDelegatedRefreshCoordinator {
         cooldown = failureCooldown
 
         let task = Task.detached(priority: .utility) {
-            await Self.performRefresh(binary: binary, previousCredentials: previousCredentials)
+            let outcome = await Self.performRefresh(binary: binary, previousCredentials: previousCredentials)
+            await self.finishAttempt(id: attemptID, outcome: outcome)
+            return outcome
         }
-        inFlight = InFlight(id: attemptID, interaction: interaction, task: task)
+        let current = InFlight(id: attemptID, interaction: interaction, task: task)
+        inFlight = current
 
-        let outcome = await task.value
-        if inFlight?.id == attemptID {
+        return await waitForResult(current)
+    }
+
+    private func finishAttempt(id: UInt64, outcome: Outcome) {
+        if inFlight?.id == id {
             inFlight = nil
+            lastAttemptAt = Date()
             cooldown = outcome.wasRefreshed ? successCooldown : failureCooldown
         }
-        return outcome
+    }
+
+    private func waitForResult(_ current: InFlight) async -> Outcome {
+        // UI の待機だけを区切り、CLI は自然終了まで保持する。
+        let deadline = ProcessInfo.processInfo.systemUptime + 30
+        while inFlight?.id == current.id {
+            if Task.isCancelled || ProcessInfo.processInfo.systemUptime >= deadline {
+                return .inProgress
+            }
+            do {
+                try await Task.sleep(nanoseconds: 100_000_000)
+            } catch {
+                return .inProgress
+            }
+        }
+        return await current.task.value
     }
 
     private static func performRefresh(binary: String, previousCredentials: ClaudeOAuthCredentials?) async -> Outcome {
@@ -250,13 +266,9 @@ actor ClaudeOAuthDelegatedRefreshCoordinator {
         // 更新後のポーリングでもこのメタデータだけを比較し、変化した時に限り1回復号する。
         let initialRevision = ClaudeOAuthCredentialReader.revision()
         do {
-            try await ClaudeAuthPTYProbe.touchOAuthPath(binary: binary, timeout: 8)
-        } catch ClaudeAuthPTYProbe.ProbeError.onboardingRequired {
+            try ClaudeAuthCLIProbe.touchOAuthPath(binary: binary)
+        } catch ClaudeAuthCLIProbe.ProbeError.onboardingRequired {
             return .onboardingRequired
-        } catch ClaudeAuthPTYProbe.ProbeError.loginRequired {
-            return .loginRequired
-        } catch ClaudeAuthPTYProbe.ProbeError.manualInteractionRequired {
-            return .manualInteractionRequired
         } catch {
             return .failed(error.localizedDescription)
         }
@@ -273,8 +285,8 @@ actor ClaudeOAuthDelegatedRefreshCoordinator {
             {
                 attemptedDecryption = true
                 lastDecryptedRevision = currentRevision
-                if let credentials = ClaudeOAuthCredentialReader.load(),
-                   credentials != previousCredentials,
+                guard let credentials = ClaudeOAuthCredentialReader.load() else { return .loginRequired }
+                if credentials != previousCredentials,
                    !credentials.isExpired
                 {
                     return .refreshed(credentials)
@@ -353,417 +365,164 @@ enum ClaudeCLIResolver {
     }
 }
 
-/// Claude の対話 CLI を疑似端末上で起動し、`/status` を送って認証経路を通す。
-/// 出力はプロンプト応答の判定にだけ使い、ログやファイルには保存しない。
-enum ClaudeAuthPTYProbe {
+/// 非対話 CLI に認証更新を委譲し、自然終了まで待つ。
+///
+/// 認証更新自体は数秒で終わるため、`hangTimeout` を超えて戻らない場合だけハングとみなして
+/// SIGTERM を送り、それでも終了しなければ SIGKILL する。
+enum ClaudeAuthCLIProbe {
+    private static let hangTimeout: TimeInterval = 5 * 60
+    private static let killGracePeriod: TimeInterval = 10
+
     enum ProbeError: LocalizedError {
         case launchFailed(String)
         case onboardingRequired
-        case loginRequired
-        case manualInteractionRequired
-        case processExited
-        case ioFailed(String)
+        case unsupportedVersion
+        case processExited(Int32)
+        case timedOut
         case outputTooLarge
 
         var errorDescription: String? {
             switch self {
-            case .launchFailed(let message): return "Claude CLI を起動できませんでした: \(message)"
+            case .launchFailed(let message):
+                return "Claude CLI を起動できませんでした: \(message)"
             case .onboardingRequired:
                 return "Claude CLI の初回設定が未完了です。ターミナルで `claude` を一度起動して設定を完了してください。"
-            case .loginRequired:
-                return "Claude CLI の再ログインが必要です。ターミナルで `claude auth login` を実行してください。"
-            case .manualInteractionRequired:
-                return "Claude CLI が対話操作を求めています。ターミナルで `claude` を起動して画面を確認してください。"
-            case .processExited: return "Claude CLI が認証確認前に終了しました。"
-            case .ioFailed(let message): return "Claude CLI の PTY 通信に失敗しました: \(message)"
-            case .outputTooLarge: return "Claude CLI の出力が安全上限を超えました。"
+            case .unsupportedVersion:
+                return "自動認証更新には Claude Code 2.1.292 以降が必要です。ターミナルで `claude update` を実行してください。"
+            case .processExited(let status):
+                return "Claude CLI の使用量確認に失敗しました（終了コード \(status)）。ターミナルで `claude` の認証状態を確認してください。"
+            case .timedOut:
+                return "Claude CLI が \(Int(hangTimeout / 60)) 分以上応答しなかったため停止しました。ターミナルで `claude` を起動して状態を確認してください。"
+            case .outputTooLarge:
+                return "Claude CLI のバージョン出力が上限を超えました。"
             }
         }
     }
 
-    private static let outputLimit = 1_048_576
-    private static let outputReadPassLimit = 65_536
-    private static let cursorQuery = Data([0x1B, 0x5B, 0x36, 0x6E])
-    private static let onboardingNeedles = [
-        normalized("Welcome to Claude Code"),
-        normalized("Choose the text style that looks best with your terminal"),
-        normalized("Dark mode (colorblind-friendly)"),
-        normalized("Light mode (colorblind-friendly)"),
-    ]
-    /// オンボーディング完了後でも、refresh token の失効・取り消しなどで表示される。
-    /// この状態ではブラウザ認証へ進めず、ユーザ自身による `claude auth login` に委ねる。
-    private static let loginNeedles = [
-        normalized("Select login method:"),
-        normalized("Paste code here if prompted"),
-        normalized("Browser didn't open"),
-        normalized("oauth/authorize"),
-        normalized("Not logged"),
-        normalized("Run claude auth login"),
-        normalized("Please run /login"),
-        normalized("OAuth token expired"),
-        normalized("OAuth token revoked"),
-    ]
-    /// 意味を確定できない汎用プロンプトには、自動で Enter を送らない。
-    private static let manualInteractionNeedles = [
-        normalized("Press Enter to continue"),
-    ]
-    /// 通常の入力画面に固有の表示。未知の画面では `/status` 自体も送らず安全側に倒す。
-    private static let normalReadyNeedles = [
-        normalized("? for shortcuts"),
-        normalized("Tips for getting started"),
-    ]
-    private static let promptResponses: [(needle: String, response: String)] = [
-        (normalized("Do you trust the files in this folder?"), "y\r"),
-        (normalized("Quick safety check:"), "\r"),
-        (normalized("Yes, I trust this folder"), "\r"),
-        (normalized("Ready to code here?"), "\r"),
-        (normalized("Show Claude Code status"), "\r"),
-        (normalized("Show Claude Code"), "\r"),
-    ]
-
-    static func touchOAuthPath(
-        binary: String,
-        timeout: TimeInterval,
-        workingDirectoryOverride: URL? = nil,
-        onboardingStateOverride: ClaudeCLIOnboardingState? = nil,
-        environmentOverride: [String: String]? = nil
-    ) async throws {
-        var primaryFD: Int32 = -1
-        var secondaryFD: Int32 = -1
-        var window = winsize(ws_row: 50, ws_col: 160, ws_xpixel: 0, ws_ypixel: 0)
-        guard openpty(&primaryFD, &secondaryFD, nil, nil, &window) == 0 else {
-            throw ProbeError.launchFailed("openpty failed")
-        }
-        _ = fcntl(primaryFD, F_SETFL, O_NONBLOCK)
-
-        let primaryHandle = FileHandle(fileDescriptor: primaryFD, closeOnDealloc: true)
-        let secondaryHandle = FileHandle(fileDescriptor: secondaryFD, closeOnDealloc: true)
-        let process = Process()
-        let workingDirectory: URL
-        let sessionID: UUID
-        if let workingDirectoryOverride {
-            try FileManager.default.createDirectory(
-                at: workingDirectoryOverride,
-                withIntermediateDirectories: true
-            )
-            workingDirectory = workingDirectoryOverride
-            sessionID = UUID()
-        } else {
-            let probeWorkspace = try ClaudeAuthProbeWorkspace.prepare()
-            workingDirectory = probeWorkspace.directory
-            sessionID = probeWorkspace.sessionID
-        }
-
-        let baseEnvironment = environmentOverride ?? ProcessInfo.processInfo.environment
-        let onboardingState = onboardingStateOverride
-            ?? ClaudeCLIOnboardingProbe.state(
-                environment: baseEnvironment,
-                workingDirectory: workingDirectory
-            )
+    // coordinator の detached task から実行し、UI のキャンセルでは停止しない。
+    static func touchOAuthPath(binary: String) throws {
+        let environment = ProcessInfo.processInfo.environment
+        let onboardingState = ClaudeCLIOnboardingProbe.state(environment: environment)
         guard onboardingState == .completed else { throw ProbeError.onboardingRequired }
 
-        process.executableURL = URL(fileURLWithPath: binary)
-        process.arguments = [
-            "--allowed-tools", "",
-            "--session-id", sessionID.uuidString.lowercased(),
-        ]
-        process.currentDirectoryURL = workingDirectory
-        process.standardInput = secondaryHandle
-        process.standardOutput = secondaryHandle
-        process.standardError = secondaryHandle
-
-        var environment = baseEnvironment
-        environment.removeValue(forKey: "CLAUDE_CODE_OAUTH_TOKEN")
-        environment.removeValue(forKey: "CLAUDE_CODE_OAUTH_SCOPES")
-        for key in environment.keys where key.hasPrefix("ANTHROPIC_") {
-            environment.removeValue(forKey: key)
-        }
-        environment["DISABLE_AUTOUPDATER"] = "1"
-        environment["PWD"] = workingDirectory.path
-        environment["PATH"] = enrichedPATH(binary: binary, environment: environment)
-        process.environment = environment
-
-        do {
-            try process.run()
-        } catch {
-            try? primaryHandle.close()
-            try? secondaryHandle.close()
-            throw ProbeError.launchFailed(error.localizedDescription)
-        }
-
-        let pid = process.processIdentifier
-        let processGroup: pid_t? = setpgid(pid, pid) == 0 ? pid : nil
-        defer {
-            // ウィザード検知による終了時もここを通るため、`/exit` などの文字列は送らない。
-            // 入力先が通常画面だと確認できていない状態でキーを送る余地を残さない。
-            if let processGroup {
-                kill(-processGroup, SIGTERM)
-            } else if process.isRunning {
-                process.terminate()
-            }
-            let waitUntil = Date().addingTimeInterval(0.5)
-            while process.isRunning, Date() < waitUntil { usleep(50_000) }
-            if process.isRunning {
-                if let processGroup {
-                    kill(-processGroup, SIGKILL)
-                } else {
-                    kill(pid, SIGKILL)
-                }
-            }
-            try? primaryHandle.close()
-            try? secondaryHandle.close()
-        }
-
-        let start = Date()
-        let commandAt = start.addingTimeInterval(2)
-        let deadline = start.addingTimeInterval(max(3, timeout))
-        var commandSent = false
-        var scanData = Data()
-        var totalOutput = 0
-        var triggeredPrompts = Set<String>()
-        var cursorQueryHandled = false
-        var lastOutputAt = start
-        var normalReadyObserved = false
-
-        while Date() < deadline {
-            // 累積上限を1バイト超えるところまでしか読まず、1回の読み取りも64KBで返す。
-            // 子プロセスが書き続けても、この呼び出し内でメモリが無制限に増えない。
-            let readBudget = min(outputReadPassLimit, outputLimit - totalOutput + 1)
-            let chunk = try readAvailable(from: primaryFD, maxBytes: readBudget)
-            if !chunk.isEmpty {
-                lastOutputAt = Date()
-                totalOutput += chunk.count
-                guard totalOutput <= outputLimit else { throw ProbeError.outputTooLarge }
-
-                scanData.append(chunk)
-                if scanData.count > 32_768 { scanData = Data(scanData.suffix(32_768)) }
-                let normalizedOutput = normalized(String(decoding: scanData, as: UTF8.self))
-                if loginNeedles.contains(where: normalizedOutput.contains) {
-                    throw ProbeError.loginRequired
-                }
-                if onboardingNeedles.contains(where: normalizedOutput.contains) {
-                    throw ProbeError.onboardingRequired
-                }
-                if manualInteractionNeedles.contains(where: normalizedOutput.contains) {
-                    throw ProbeError.manualInteractionRequired
-                }
-                if normalReadyNeedles.contains(where: normalizedOutput.contains) {
-                    normalReadyObserved = true
-                }
-                if !cursorQueryHandled, scanData.range(of: cursorQuery) != nil {
-                    try? write(Data("\u{1b}[1;1R".utf8), to: primaryFD)
-                    cursorQueryHandled = true
-                }
-                for item in promptResponses where !triggeredPrompts.contains(item.needle) {
-                    if normalizedOutput.contains(item.needle) {
-                        try? write(Data(item.response.utf8), to: primaryFD)
-                        triggeredPrompts.insert(item.needle)
-                        // 2 つの command palette 表記は包含関係にあるため、1 回の表示で
-                        // Enter を二重送信しないよう同じグループをまとめて処理済みにする。
-                        if item.needle.hasPrefix("showclaudecode") {
-                            for commandItem in promptResponses
-                                where commandItem.needle.hasPrefix("showclaudecode")
-                            {
-                                triggeredPrompts.insert(commandItem.needle)
-                            }
-                        }
-                        break
-                    }
-                }
-            }
-
-            let now = Date()
-            // 通常画面を明示的に確認し、断片化した警告文を読み切れるだけの静穏時間を置く。
-            // 未知の画面や安定しない TUI には `/status` 自体を送らず、安全側に倒す。
-            if !commandSent,
-               normalReadyObserved,
-               now >= commandAt,
-               now.timeIntervalSince(lastOutputAt) >= 0.5
-            {
-                try write(Data("/status\r".utf8), to: primaryFD)
-                commandSent = true
-            }
-
-            guard process.isRunning else { throw ProbeError.processExited }
-            try await Task.sleep(nanoseconds: 60_000_000)
-        }
-
-        guard commandSent else { throw ProbeError.manualInteractionRequired }
-    }
-
-    private static func readAvailable(from fd: Int32, maxBytes: Int) throws -> Data {
-        guard maxBytes > 0 else { return Data() }
-        var result = Data()
-        result.reserveCapacity(min(maxBytes, 8192))
-        while result.count < maxBytes {
-            let requestSize = min(8192, maxBytes - result.count)
-            var buffer = [UInt8](repeating: 0, count: requestSize)
-            let count = Darwin.read(fd, &buffer, buffer.count)
-            if count > 0 {
-                result.append(contentsOf: buffer.prefix(count))
-                continue
-            }
-            if count == 0 { break }
-            if errno == EINTR { continue }
-            if errno == EAGAIN || errno == EWOULDBLOCK { break }
-            throw ProbeError.ioFailed(String(cString: strerror(errno)))
-        }
-        return result
-    }
-
-    private static func enrichedPATH(binary: String, environment: [String: String]) -> String {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        var entries = [
-            URL(fileURLWithPath: binary).deletingLastPathComponent().path,
-            "\(home)/.local/bin",
-            "/opt/homebrew/bin",
-            "/usr/local/bin",
-            "/usr/bin",
-            "/bin",
-        ]
-        entries.append(contentsOf: (environment["PATH"] ?? "").split(separator: ":").map(String.init))
-
-        var seen = Set<String>()
-        return entries.filter { !$0.isEmpty && seen.insert($0).inserted }.joined(separator: ":")
-    }
-
-    private static func write(_ data: Data, to fd: Int32) throws {
-        try data.withUnsafeBytes { bytes in
-            guard let base = bytes.baseAddress else { return }
-            var offset = 0
-            var retries = 0
-            while offset < bytes.count {
-                let count = Darwin.write(fd, base.advanced(by: offset), bytes.count - offset)
-                if count > 0 {
-                    offset += count
-                    retries = 0
-                    continue
-                }
-                if count < 0, [EINTR, EAGAIN, EWOULDBLOCK].contains(errno), retries < 200 {
-                    retries += 1
-                    usleep(5_000)
-                    continue
-                }
-                throw ProbeError.ioFailed(String(cString: strerror(errno)))
-            }
-        }
-    }
-
-    private static func normalized(_ text: String) -> String {
-        let withoutANSI = text.replacingOccurrences(
-            of: "\u{001B}\\[[0-?]*[ -/]*[@-~]",
-            with: "",
-            options: .regularExpression
-        )
-        return withoutANSI.lowercased().filter { !$0.isWhitespace }
-    }
-}
-
-/// 認証プローブ専用の作業ディレクトリと Claude セッション ID を管理する。
-///
-/// ID を固定すると、更新のたびに空の Claude セッションを増やさずに済む。一方、Claude CLI の
-/// `--session-id` は同じ transcript が残っていると再作成に失敗するため、この専用ディレクトリに
-/// 対応する前回の JSONL だけを起動前に削除する。ユーザのプロジェクトは対象にならない。
-private enum ClaudeAuthProbeWorkspace {
-    private static let sessionIDFilename = ".usagebar-session-id"
-
-    struct Prepared {
-        let directory: URL
-        let sessionID: UUID
-    }
-
-    static func prepare(fileManager: FileManager = .default) throws -> Prepared {
-        let base = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? fileManager.temporaryDirectory
-        let directory = base
-            .appendingPathComponent("ClaudeCodexUsageBar", isDirectory: true)
-            .appendingPathComponent("ClaudeAuthProbe", isDirectory: true)
-        try fileManager.createDirectory(
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ClaudeUsageBarAuth-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(
             at: directory,
             withIntermediateDirectories: true,
             attributes: [.posixPermissions: 0o700]
         )
+        defer { try? FileManager.default.removeItem(at: directory) }
 
-        let sessionID = loadOrCreateSessionID(in: directory, fileManager: fileManager)
-        removePreviousProbeTranscripts(for: directory, fileManager: fileManager)
-        return Prepared(directory: directory, sessionID: sessionID)
+        var cliEnvironment = environment
+        cliEnvironment.removeValue(forKey: "CLAUDE_CODE_OAUTH_TOKEN")
+        cliEnvironment.removeValue(forKey: "CLAUDE_CODE_OAUTH_SCOPES")
+        for key in cliEnvironment.keys where key.hasPrefix("ANTHROPIC_") {
+            cliEnvironment.removeValue(forKey: key)
+        }
+        cliEnvironment["DISABLE_AUTOUPDATER"] = "1"
+        cliEnvironment["PWD"] = directory.path
+        cliEnvironment["PATH"] = enrichedPATH(binary: binary, environment: cliEnvironment)
+
+        let version = try run(
+            binary: binary,
+            arguments: ["--version"],
+            directory: directory,
+            environment: cliEnvironment,
+            captureVersion: true
+        )
+        guard supportsUsageCommand(version) else { throw ProbeError.unsupportedVersion }
+
+        // safe-mode はカスタムコマンド・ユーザの hooks / MCP / skills を無効化する。
+        // bare は OAuth 自体を無効化するため使わない。モデルに送る通常の質問も渡さない。
+        _ = try run(
+            binary: binary,
+            arguments: [
+                "--safe-mode", "--no-session-persistence", "--tools", "",
+                "--output-format", "json", "-p", "/usage",
+            ],
+            directory: directory,
+            environment: cliEnvironment,
+            captureVersion: false
+        )
     }
 
-    private static func loadOrCreateSessionID(in directory: URL, fileManager: FileManager) -> UUID {
-        let url = directory.appendingPathComponent(sessionIDFilename)
-        if let raw = try? String(contentsOf: url, encoding: .utf8),
-           let existing = UUID(uuidString: raw.trimmingCharacters(in: .whitespacesAndNewlines))
-        {
-            return existing
-        }
+    /// 未確認の旧 CLI に `/usage` を渡さず、非対話コマンド対応の確認済みバージョンから使う。
+    private static func supportsUsageCommand(_ output: String) -> Bool {
+        guard let first = output.split(whereSeparator: { $0.isWhitespace }).first else { return false }
+        let parts = first.split(separator: ".", omittingEmptySubsequences: false)
+        guard parts.count == 3 else { return false }
+        let numbers = parts.compactMap { Int($0) }
+        guard numbers.count == 3, numbers.allSatisfy({ $0 >= 0 }) else { return false }
+        // メジャーバージョン変更時は動作確認をやり直す。
+        return numbers[0] == 2 && (numbers[1] > 1 || (numbers[1] == 1 && numbers[2] >= 292))
+    }
 
-        let sessionID = UUID()
+    private static func run(
+        binary: String,
+        arguments: [String],
+        directory: URL,
+        environment: [String: String],
+        captureVersion: Bool
+    ) throws -> String {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: binary)
+        process.arguments = arguments
+        process.currentDirectoryURL = directory
+        process.environment = environment
+        process.standardInput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        // パイプを EOF まで読むと、stdout を引き継いだ子孫プロセスが残る間は戻らない。
+        // 一時ファイルに書かせ、直接起動したプロセスの終了後に先頭だけ読む。
+        var output: FileHandle?
+        if captureVersion {
+            let url = directory.appendingPathComponent("version.txt")
+            guard FileManager.default.createFile(atPath: url.path, contents: nil, attributes: [.posixPermissions: 0o600]),
+                  let handle = try? FileHandle(forUpdating: url)
+            else { throw ProbeError.launchFailed("出力ファイルを作成できませんでした。") }
+            output = handle
+        }
+        defer { try? output?.close() }
+        process.standardOutput = output ?? FileHandle.nullDevice
         do {
-            try sessionID.uuidString.lowercased().write(to: url, atomically: true, encoding: .utf8)
-            try fileManager.setAttributes(
-                [.posixPermissions: NSNumber(value: Int16(0o600))],
-                ofItemAtPath: url.path
-            )
+            try process.run()
         } catch {
-            // 永続化できなくても今回のプローブは一意な ID で実行できる。
+            throw ProbeError.launchFailed(error.localizedDescription)
         }
-        return sessionID
-    }
 
-    private static func removePreviousProbeTranscripts(
-        for directory: URL,
-        fileManager: FileManager
-    ) {
-        let projectName = claudeProjectDirectoryName(for: directory)
-        for root in claudeConfigRoots(fileManager: fileManager) {
-            let projectDirectory = root
-                .appendingPathComponent("projects", isDirectory: true)
-                .appendingPathComponent(projectName, isDirectory: true)
-            guard let entries = try? fileManager.contentsOfDirectory(
-                at: projectDirectory,
-                includingPropertiesForKeys: [.isRegularFileKey],
-                options: [.skipsHiddenFiles]
-            ) else { continue }
-
-            for entry in entries where entry.pathExtension == "jsonl" {
-                guard (try? entry.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true else {
-                    continue
-                }
-                try? fileManager.removeItem(at: entry)
+        let startedAt = ProcessInfo.processInfo.systemUptime
+        let watchdog = DispatchWorkItem {
+            guard process.isRunning else { return }
+            process.terminate()
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + killGracePeriod) {
+                if process.isRunning { kill(process.processIdentifier, SIGKILL) }
             }
         }
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + hangTimeout, execute: watchdog)
+        defer { watchdog.cancel() }
+
+        process.waitUntilExit()
+        if ProcessInfo.processInfo.systemUptime - startedAt >= hangTimeout {
+            throw ProbeError.timedOut
+        }
+        guard process.terminationReason == .exit, process.terminationStatus == 0 else {
+            throw ProbeError.processExited(process.terminationStatus)
+        }
+        guard let output else { return "" }
+        // バージョン出力だけ保持する。上限 + 1 バイトまで読み、超過を判定する。
+        try? output.seek(toOffset: 0)
+        let data = output.readData(ofLength: 4097)
+        guard data.count <= 4096 else { throw ProbeError.outputTooLarge }
+        return String(decoding: data, as: UTF8.self)
     }
 
-    private static func claudeConfigRoots(fileManager: FileManager) -> [URL] {
-        var roots: [URL] = []
+    private static func enrichedPATH(binary: String, environment: [String: String]) -> String {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
         var seen = Set<String>()
-        func append(_ url: URL) {
-            let standardized = url.standardizedFileURL
-            guard seen.insert(standardized.path).inserted else { return }
-            roots.append(standardized)
-        }
-
-        if let configured = ProcessInfo.processInfo.environment["CLAUDE_CONFIG_DIR"] {
-            for part in configured.split(separator: ",") {
-                let path = part.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !path.isEmpty { append(URL(fileURLWithPath: path)) }
-            }
-        }
-        let home = fileManager.homeDirectoryForCurrentUser
-        append(home.appendingPathComponent(".claude", isDirectory: true))
-        append(home.appendingPathComponent(".config/claude", isDirectory: true))
-        return roots
-    }
-
-    private static func claudeProjectDirectoryName(for directory: URL) -> String {
-        let path = directory.path.precomposedStringWithCanonicalMapping
-        return String(path.utf16.map { codeUnit in
-            switch codeUnit {
-            case 48...57, 65...90, 97...122:
-                return Character(UnicodeScalar(codeUnit)!)
-            default:
-                return "-"
-            }
-        })
+        let entries = [
+            URL(fileURLWithPath: binary).deletingLastPathComponent().path,
+            "\(home)/.local/bin", "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin",
+        ] + (environment["PATH"] ?? "").split(separator: ":").map(String.init)
+        return entries.filter { !$0.isEmpty && seen.insert($0).inserted }.joined(separator: ":")
     }
 }
