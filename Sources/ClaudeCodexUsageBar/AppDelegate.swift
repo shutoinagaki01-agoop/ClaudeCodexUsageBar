@@ -236,18 +236,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
     private func addCodexResetAction(to menu: NSMenu) {
         let count = latestCodex?.rateLimitResetCreditsAvailable ?? 0
+        let credits = latestCodex?.resetCredits ?? []
         var title = "Codex リセット: 残り\(count)回"
-        if count > 0, let expiresAt = latestCodex?.nextResetCreditExpiresAt {
-            title += " · 期限 \(formatMonthDayTime(expiresAt))"
+        if count > 0, let expiresAt = credits.first?.expiresAt {
+            title += " · 最短期限 \(formatMonthDayTime(expiresAt))"
         }
-        let item = NSMenuItem(title: title, action: #selector(resetCodexUsageAction), keyEquivalent: "")
-        item.target = self
-        item.isEnabled = count > 0 && !isResettingCodexUsage
-        if !item.isEnabled {
-            // NSMenu の自動検証で再び有効にならないよう、実行先も外す。
-            item.action = nil
+        guard count > 0, !isResettingCodexUsage else {
+            addDisabledItem(to: menu, title: title)
+            return
         }
-        menu.addItem(item)
+        guard !credits.isEmpty else {
+            // 一覧を取得できなかった場合は、従来どおり期限が最も近いリセット権を使う。
+            let item = NSMenuItem(title: title, action: #selector(resetCodexUsageAction(_:)), keyEquivalent: "")
+            item.target = self
+            menu.addItem(item)
+            return
+        }
+
+        // 使うリセット権を選べるよう、期限が近い順にサブメニューへ並べる。
+        let parent = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        let submenu = NSMenu()
+        for credit in credits {
+            let item = NSMenuItem(
+                title: codexResetCreditTitle(credit),
+                action: #selector(resetCodexUsageAction(_:)),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.representedObject = credit.id
+            submenu.addItem(item)
+        }
+        parent.submenu = submenu
+        menu.addItem(parent)
+    }
+
+    private func codexResetCreditTitle(_ credit: CodexResetCredit) -> String {
+        let name = credit.title ?? "リセット"
+        guard let expiresAt = credit.expiresAt else { return "\(name) · 期限なし" }
+        return "\(name) · 期限 \(formatMonthDayTime(expiresAt))"
     }
 
     private func addDataSubmenu(to menu: NSMenu) {
@@ -840,14 +866,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         }
     }
 
-    @objc private func resetCodexUsageAction() {
+    @objc private func resetCodexUsageAction(_ sender: NSMenuItem) {
         guard config.codexEnabled, !isResettingCodexUsage else { return }
         let count = latestCodex?.rateLimitResetCreditsAvailable ?? 0
         guard count > 0 else { return }
+        let creditID = sender.representedObject as? String
+        let credit = creditID.flatMap { id in latestCodex?.resetCredits.first { $0.id == id } }
 
         let alert = NSAlert()
         alert.messageText = "Codex 使用量をリセットしますか？"
-        alert.informativeText = "リセット可能回数を1回消費します。現在の残り回数は \(count) 回です。この操作は取り消せません。"
+        let target = credit.map { "「\(codexResetCreditTitle($0))」を使います。" } ?? "期限が最も近いリセット権を使います。"
+        alert.informativeText = "\(target)リセット可能回数を1回消費します。現在の残り回数は \(count) 回です。この操作は取り消せません。"
         alert.alertStyle = .warning
         alert.addButton(withTitle: "リセット")
         alert.addButton(withTitle: "キャンセル")
@@ -861,7 +890,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         Task { [weak self] in
             guard let self = self else { return }
             do {
-                try await self.codexFetcher.consumeRateLimitResetCredit()
+                try await self.codexFetcher.consumeRateLimitResetCredit(creditID: creditID)
                 await MainActor.run {
                     self.isResettingCodexUsage = false
                     self.refreshCodex()

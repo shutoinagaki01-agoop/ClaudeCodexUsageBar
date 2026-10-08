@@ -67,12 +67,13 @@ final class CodexUsageFetcher {
         }
     }
 
-    func consumeRateLimitResetCredit() async throws {
+    /// `creditID` が nil の場合は、期限が最も近いリセット権を使う。
+    func consumeRateLimitResetCredit(creditID: String?) async throws {
         let auth = try loadAuth()
 
         if canAttempt(auth) {
             do {
-                try await requestConsumeRateLimitResetCredit(auth: auth)
+                try await requestConsumeRateLimitResetCredit(auth: auth, creditID: creditID)
                 return
             } catch FetchError.unauthorized {
                 // 読み直しに進む
@@ -83,7 +84,7 @@ final class CodexUsageFetcher {
             throw FetchError.codexAuthExpired
         }
         do {
-            try await requestConsumeRateLimitResetCredit(auth: reloaded)
+            try await requestConsumeRateLimitResetCredit(auth: reloaded, creditID: creditID)
         } catch FetchError.unauthorized {
             throw FetchError.codexAuthExpired
         }
@@ -108,13 +109,13 @@ final class CodexUsageFetcher {
         // 200 が返った時点でトークンは有効。この後の解析失敗は認証の問題ではない。
         rejectedAccessTokenDigest = nil
         DebugDump.writeCodex(data: prettyJSON(data) ?? data)
-        let expiresAt = try? await nextResetCreditExpiration(accessToken: auth.accessToken, accountID: auth.accountID)
-        return try decodeUsage(data, nextResetCreditExpiresAt: expiresAt)
+        let credits = (try? await availableResetCredits(accessToken: auth.accessToken, accountID: auth.accountID)) ?? []
+        return try decodeUsage(data, resetCredits: credits)
     }
 
-    private func requestConsumeRateLimitResetCredit(auth: CodexAuth) async throws {
+    private func requestConsumeRateLimitResetCredit(auth: CodexAuth, creditID: String?) async throws {
         do {
-            try await consumeRateLimitResetCredit(accessToken: auth.accessToken, accountID: auth.accountID)
+            try await consumeRateLimitResetCredit(accessToken: auth.accessToken, accountID: auth.accountID, creditID: creditID)
             rejectedAccessTokenDigest = nil
         } catch FetchError.unauthorized {
             rejectedAccessTokenDigest = auth.accessTokenDigest
@@ -178,31 +179,43 @@ final class CodexUsageFetcher {
         }
     }
 
-    private func consumeRateLimitResetCredit(accessToken: String, accountID: String?) async throws {
-        let creditID = try await firstAvailableResetCreditID(accessToken: accessToken, accountID: accountID)
+    private func consumeRateLimitResetCredit(accessToken: String, accountID: String?, creditID: String?) async throws {
+        // メニュー表示後に使用・失効している場合があるため、送信直前の一覧で利用可能か確認する。
+        let credits = try await availableResetCredits(accessToken: accessToken, accountID: accountID)
+        let credit = creditID.map { id in credits.first { $0.id == id } } ?? credits.first
+        guard let credit else {
+            throw FetchError.decodeFailed("Codex reset credit is not available.")
+        }
         try await postResetCredit(
             accessToken: accessToken,
             accountID: accountID,
-            creditID: creditID,
+            creditID: credit.id,
             redeemRequestID: UUID().uuidString
         )
     }
 
-    private func firstAvailableResetCreditID(accessToken: String, accountID: String?) async throws -> String {
-        let credits = try await resetCredits(accessToken: accessToken, accountID: accountID)
-        guard let credit = earliestExpiringAvailableCredit(from: credits),
-              let id = credit["id"] as? String,
-              !id.isEmpty
-        else {
-            throw FetchError.decodeFailed("Codex reset credit is not available.")
-        }
-        return id
-    }
-
-    private func nextResetCreditExpiration(accessToken: String, accountID: String?) async throws -> Date? {
-        let credits = try await resetCredits(accessToken: accessToken, accountID: accountID)
-        guard let credit = earliestExpiringAvailableCredit(from: credits) else { return nil }
-        return dateValue(credit["expires_at"])
+    /// 利用可能なリセット権を期限が近い順に返す。期限なしは最後。
+    private func availableResetCredits(accessToken: String, accountID: String?) async throws -> [CodexResetCredit] {
+        try await resetCredits(accessToken: accessToken, accountID: accountID)
+            .filter { ($0["status"] as? String) == "available" }
+            .compactMap { credit -> CodexResetCredit? in
+                guard let id = credit["id"] as? String, !id.isEmpty else { return nil }
+                // Codex 全体のリセットは API の表示名（「完全リセット」）ではなく「フルリセット」と表示する。
+                let title = (credit["reset_type"] as? String) == "codex_rate_limits"
+                    ? "フルリセット"
+                    : (credit["title"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+                return CodexResetCredit(id: id, title: title, expiresAt: dateValue(credit["expires_at"]))
+            }
+            .sorted { lhs, rhs in
+                switch (lhs.expiresAt, rhs.expiresAt) {
+                case let (lhsDate?, rhsDate?):
+                    return lhsDate < rhsDate
+                case (_?, nil):
+                    return true
+                case (nil, _):
+                    return false
+                }
+            }
     }
 
     private func resetCredits(accessToken: String, accountID: String?) async throws -> [[String: Any]] {
@@ -237,23 +250,6 @@ final class CodexUsageFetcher {
             throw FetchError.decodeFailed("Codex reset credits response is not valid.")
         }
         return credits
-    }
-
-    private func earliestExpiringAvailableCredit(from credits: [[String: Any]]) -> [String: Any]? {
-        credits
-            .filter { ($0["status"] as? String) == "available" }
-            .min { lhs, rhs in
-                switch (dateValue(lhs["expires_at"]), dateValue(rhs["expires_at"])) {
-                case let (lhsDate?, rhsDate?):
-                    return lhsDate < rhsDate
-                case (_?, nil):
-                    return true
-                case (nil, _?):
-                    return false
-                case (nil, nil):
-                    return false
-                }
-            }
     }
 
     private func postResetCredit(accessToken: String, accountID: String?, creditID: String, redeemRequestID: String) async throws {
@@ -293,7 +289,7 @@ final class CodexUsageFetcher {
         }
     }
 
-    private func decodeUsage(_ data: Data, nextResetCreditExpiresAt: Date?) throws -> CodexUsageSnapshot {
+    private func decodeUsage(_ data: Data, resetCredits: [CodexResetCredit]) throws -> CodexUsageSnapshot {
         guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw FetchError.decodeFailed("Codex usage response is not a JSON object.")
         }
@@ -308,7 +304,7 @@ final class CodexUsageFetcher {
             fiveHour: tracks.first(where: { $0.label == "5h" }),
             sevenDay: tracks.first(where: { $0.label == "7d" }),
             rateLimitResetCreditsAvailable: resetCreditsAvailable(from: root),
-            nextResetCreditExpiresAt: nextResetCreditExpiresAt,
+            resetCredits: resetCredits,
             fetchedAt: Date()
         )
     }

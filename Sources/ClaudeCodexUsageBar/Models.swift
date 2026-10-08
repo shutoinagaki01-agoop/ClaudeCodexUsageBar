@@ -135,12 +135,19 @@ struct CodexUsageTrack: Equatable {
     }
 }
 
+struct CodexResetCredit: Equatable {
+    let id: String
+    let title: String?
+    let expiresAt: Date?
+}
+
 struct CodexUsageSnapshot: Equatable {
     let plan: String
     let fiveHour: CodexUsageTrack?
     let sevenDay: CodexUsageTrack?
     let rateLimitResetCreditsAvailable: Int
-    let nextResetCreditExpiresAt: Date?
+    /// 利用可能なリセット権。期限が近い順。一覧の取得に失敗した場合は空。
+    let resetCredits: [CodexResetCredit]
     let fetchedAt: Date
 
     var tracks: [CodexUsageTrack] {
