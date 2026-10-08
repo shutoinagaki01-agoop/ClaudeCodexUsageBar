@@ -35,7 +35,7 @@ Claude                 Codex
 
 - macOS 12 (Monterey) 以降
 - Xcode Command Line Tools (`xcode-select --install`) もしくは Xcode 本体
-- Claude 機能を使う場合: Claude Code / Claude CLI でログインし、CLI の初回セットアップを完了済み
+- Claude 機能を使う場合: Claude Code / Claude CLI でログイン済み
 - Codex 機能を使う場合: Codex CLI でログイン済み
 
 Claude の認証が切れた場合、本アプリは公式 Claude CLI に認証更新を委譲できます。アプリ自身がリフレッシュトークンを保持することはありません。
@@ -47,11 +47,10 @@ Claude の認証が切れた場合、本アプリは公式 Claude CLI に認証�
 ### 1. Claude
 
 ```bash
-claude
+claude auth login
 ```
 
-画面の案内に従って通常の入力画面（`? for shortcuts` が表示される画面）まで進み、`/exit` で終了してください。未ログインの場合は、途中でログインを案内されます。
-本アプリは初回セットアップ画面を自動操作しません。この操作は初回のみ必要で、アクセストークンが切れるたびに `claude` を手動起動する必要はありません。
+すでにログイン済みなら再実行は不要です。
 
 ### 2. Codex
 
@@ -70,7 +69,7 @@ codex login
 
 アクセストークンの更新は Claude Code / Codex CLI に任せています。第三者アプリがリフレッシュトークンを直接使うと、サーバ側でトークンがローテーションされた際に CLI 側に古いトークンが残り、**CLI をログアウトさせてしまう**ためです。
 
-Claude の認証更新には、初回セットアップ済みの Claude Code **2.1.292 以降の 2.x** が必要です。期限切れ・HTTP 401 時に公式 CLI の非対話 `/usage` を起動し、更新された認証情報で残量取得を再試行します。ユーザの hooks 等を無効化し、セッション履歴を残さず実行します。
+Claude の認証更新には、ログイン済みの Claude Code **2.1.292 以降の 2.x** が必要です。期限切れ・HTTP 401 時に公式 CLI の非対話 `/usage` を起動し、更新された認証情報で残量取得を再試行します。ユーザの hooks 等を無効化し、セッション履歴を残さず実行します。
 
 開始した CLI は自然終了を待ちます。5 分以上応答しない場合だけハングとみなして停止します。画面側は 30 秒で待機を区切り、次回の取得で再確認します。同じアプリの実行中は認証更新を重ねません。再ログインが必要な失効は自動復旧できません。
 
@@ -92,7 +91,7 @@ brew install --cask shutoinagaki01-agoop/tap/claude-codex-usage-bar
 open -a ClaudeCodexUsageBar
 ```
 
-インストール後も、利用するサービスのログイン・初回セットアップが必要です。手順は [事前準備](#事前準備) を参照してください。macOS に起動をブロックされた場合の対処は、[Homebrew tap のインストール案内](https://github.com/shutoinagaki01-agoop/homebrew-tap#インストール) に記載しています。
+インストール後も、利用するサービスのログインが必要です。手順は [事前準備](#事前準備) を参照してください。macOS に起動をブロックされた場合の対処は、[Homebrew tap のインストール案内](https://github.com/shutoinagaki01-agoop/homebrew-tap#インストール) に記載しています。
 
 更新する場合は、次を実行してください。
 
@@ -203,9 +202,7 @@ security set-generic-password-partition-list -S apple-tool:,apple: -s "Claude Co
 | 症状 | 対処 |
 |---|---|
 | `Claude auth not found. Run claude auth login first.` | `claude auth login` を実行する |
-| `Claude CLI setup required. Run claude once in Terminal and complete the setup.` | ターミナルで `claude` を一度起動し、テーマやログイン方法などの初回設定を完了する。完了後は毎回の手動起動は不要 |
 | `Claude login required. Run claude auth login in Terminal.` | refresh token の失効・取り消しなどで再ログインが必要。ターミナルで `claude auth login` を実行する。本アプリはブラウザ認証を自動開始しない |
-| `Claude CLI needs interactive attention. ...` | ターミナルで `claude` を起動し、表示された案内を確認する。本アプリは内容を推測して Enter を送らない |
 | `Claude auth expired. Use manual refresh, or run claude auth login.` | `⌘R` で公式 CLI への更新委譲を実行する。自動化する場合は詳細設定をオン。それでも直らなければ `claude auth login` |
 | `Claude CLI auth refresh failed: ...` | ターミナルで `claude` が起動できるか確認し、直らなければ `claude auth login` |
 | `Codex auth expired. Run codex login again.` | `codex login` を再実行する |

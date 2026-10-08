@@ -165,8 +165,6 @@ enum FetchError: LocalizedError {
     case claudeAuthRefreshFailed(String)
     /// CLI は引き続き実行中。UI だけ待機を終了し、次回取得時に状態を再確認する。
     case claudeAuthRefreshInProgress
-    /// Claude Desktop の利用とは別に、Claude CLI 自身の初回セットアップが必要な状態。
-    case claudeCLISetupRequired
     /// refresh token の失効・取り消しなどにより、ユーザ自身の再ログインが必要な状態。
     case claudeLoginRequired
     case codexAuthExpired
@@ -182,8 +180,6 @@ enum FetchError: LocalizedError {
         case .claudeAuthRefreshFailed(let m): return "Claude CLI auth refresh failed: \(m)"
         case .claudeAuthRefreshInProgress:
             return "Claude CLI の認証更新を待っています。次回の取得時に再確認します。"
-        case .claudeCLISetupRequired:
-            return "Claude CLI setup required. Run `claude` once in Terminal and complete the setup."
         case .claudeLoginRequired:
             return "Claude login required. Run `claude auth login` in Terminal."
         case .codexAuthExpired: return "Codex auth expired. Run `codex login` again."
@@ -209,7 +205,7 @@ enum FetchError: LocalizedError {
     /// true の間は更新間隔を長めに落とし、Claude は設定に応じて公式 CLI へ更新を委譲する。
     var isAuthExpired: Bool {
         switch self {
-        case .claudeAuthExpired, .claudeAuthRefreshFailed, .claudeCLISetupRequired,
+        case .claudeAuthExpired, .claudeAuthRefreshFailed,
              .claudeLoginRequired, .codexAuthExpired,
              .missingClaudeOAuthCredentials, .unauthorized:
             return true
@@ -231,8 +227,6 @@ enum FetchError: LocalizedError {
             return "復帰方法: 手動更新を実行してください。直らなければ `claude auth login`。"
         case .claudeAuthRefreshFailed:
             return "復帰方法: ターミナルで `claude` を起動してください。直らなければ `claude auth login`。"
-        case .claudeCLISetupRequired:
-            return "復帰方法: ターミナルで `claude` を一度起動し、初回設定を完了してください。"
         case .claudeLoginRequired:
             return "復帰方法: ターミナルで `claude auth login` を実行してください。"
         case .codexAuthExpired:

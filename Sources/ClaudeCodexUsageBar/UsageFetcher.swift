@@ -159,8 +159,6 @@ final class UsageFetcher {
             throw fallbackError
         case .cliUnavailable:
             throw FetchError.claudeAuthRefreshFailed("`claude` コマンドが見つかりません。")
-        case .onboardingRequired:
-            throw FetchError.claudeCLISetupRequired
         case .loginRequired:
             throw FetchError.claudeLoginRequired
         case .inProgress:

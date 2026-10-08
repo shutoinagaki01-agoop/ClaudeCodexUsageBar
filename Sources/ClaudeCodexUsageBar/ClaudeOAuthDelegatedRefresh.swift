@@ -10,65 +10,6 @@ enum ClaudeAuthRefreshInteraction: Sendable {
     case userInitiated
 }
 
-enum ClaudeCLIOnboardingState: Sendable, Equatable {
-    case completed
-    case required
-    case unknown
-}
-
-/// Claude CLI が初回セットアップ済みかを、Claude 所有の設定ファイルから読み取り専用で確認する。
-/// 初回セットアップをアプリから開始しないため、非対話 CLI の起動前にも確認する。
-enum ClaudeCLIOnboardingProbe {
-    static func state(
-        environment: [String: String] = ProcessInfo.processInfo.environment,
-        workingDirectory: URL? = nil,
-        fileManager: FileManager = .default
-    ) -> ClaudeCLIOnboardingState {
-        let url = accountConfigURL(
-            environment: environment,
-            workingDirectory: workingDirectory,
-            fileManager: fileManager
-        )
-        guard let data = try? Data(contentsOf: url),
-              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-        else {
-            // 設定ファイル自体が無い場合は、まだ CLI を対話起動していないと判断する。
-            return fileManager.fileExists(atPath: url.path) ? .unknown : .required
-        }
-        guard let completed = root["hasCompletedOnboarding"] as? Bool else { return .unknown }
-        return completed ? .completed : .required
-    }
-
-    private static func accountConfigURL(
-        environment: [String: String],
-        workingDirectory: URL?,
-        fileManager: FileManager
-    ) -> URL {
-        if let configured = environment["CLAUDE_CONFIG_DIR"], !configured.isEmpty {
-            let root: URL
-            if configured.hasPrefix("/") {
-                root = URL(fileURLWithPath: configured, isDirectory: true).standardizedFileURL
-            } else {
-                let base = workingDirectory
-                    ?? URL(fileURLWithPath: fileManager.currentDirectoryPath, isDirectory: true)
-                root = base.appendingPathComponent(configured, isDirectory: true).standardizedFileURL
-            }
-            let profileConfig = root.appendingPathComponent(".config.json")
-            return fileManager.fileExists(atPath: profileConfig.path)
-                ? profileConfig
-                : root.appendingPathComponent(".claude.json")
-        }
-
-        let home: URL
-        if let rawHome = environment["HOME"], !rawHome.isEmpty {
-            home = URL(fileURLWithPath: rawHome, isDirectory: true)
-        } else {
-            home = fileManager.homeDirectoryForCurrentUser
-        }
-        return home.appendingPathComponent(".claude.json")
-    }
-}
-
 /// Claude Code が所有する認証情報の読み取り専用ストア。
 ///
 /// refresh token は解析も保持もしない。Claude CLI への委譲前後で access token や
@@ -170,7 +111,6 @@ actor ClaudeOAuthDelegatedRefreshCoordinator {
         case skippedByCooldown
         case skippedByPolicy
         case cliUnavailable
-        case onboardingRequired
         case loginRequired
         case inProgress
         case failed(String)
@@ -267,8 +207,6 @@ actor ClaudeOAuthDelegatedRefreshCoordinator {
         let initialRevision = ClaudeOAuthCredentialReader.revision()
         do {
             try ClaudeAuthCLIProbe.touchOAuthPath(binary: binary)
-        } catch ClaudeAuthCLIProbe.ProbeError.onboardingRequired {
-            return .onboardingRequired
         } catch {
             return .failed(error.localizedDescription)
         }
@@ -375,7 +313,6 @@ enum ClaudeAuthCLIProbe {
 
     enum ProbeError: LocalizedError {
         case launchFailed(String)
-        case onboardingRequired
         case unsupportedVersion
         case processExited(Int32)
         case timedOut
@@ -385,8 +322,6 @@ enum ClaudeAuthCLIProbe {
             switch self {
             case .launchFailed(let message):
                 return "Claude CLI を起動できませんでした: \(message)"
-            case .onboardingRequired:
-                return "Claude CLI の初回設定が未完了です。ターミナルで `claude` を一度起動して設定を完了してください。"
             case .unsupportedVersion:
                 return "自動認証更新には Claude Code 2.1.292 以降が必要です。ターミナルで `claude update` を実行してください。"
             case .processExited(let status):
@@ -402,8 +337,6 @@ enum ClaudeAuthCLIProbe {
     // coordinator の detached task から実行し、UI のキャンセルでは停止しない。
     static func touchOAuthPath(binary: String) throws {
         let environment = ProcessInfo.processInfo.environment
-        let onboardingState = ClaudeCLIOnboardingProbe.state(environment: environment)
-        guard onboardingState == .completed else { throw ProbeError.onboardingRequired }
 
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("ClaudeUsageBarAuth-\(UUID().uuidString)", isDirectory: true)
