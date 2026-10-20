@@ -36,6 +36,15 @@ struct ClaudeOAuthCredentials: Equatable, Sendable {
     }
 }
 
+/// 公式 CLI 2.1.292 と同じ接続元ヘッダー。
+/// サーバーはこれで接続元を判定し、他の値では cedar_ember が `ineligible_reason: "surface"` になる。
+enum ClaudeCLIHeaders {
+    static let values = [
+        "User-Agent": "claude-cli/2.1.292 (external, cli)",
+        "x-app": "cli",
+    ]
+}
+
 /// 単一の使用量トラック（例: 「7日間 Sonnet 上限」）。
 struct UsageTrack: Equatable {
     /// 表示用ラベル（例: "7d Sonnet"）
@@ -100,10 +109,105 @@ struct UsageSnapshot: Equatable {
     let plan: String?
     let tracks: [UsageTrack]
     let fetchedAt: Date
+    var claudeResetStatus: ClaudeResetStatus? = nil
+    /// 確認画面を開いた後にログイン先が変わった場合、古い確認内容で消費しない。
+    var credentialDigest: String? = nil
 
     /// メニューバーに出す主トラック。残量が最も少ないものを採用する（一番効くリミット）。
     var primary: UsageTrack? {
         tracks.min(by: { $0.remainingFraction < $1.remainingFraction })
+    }
+}
+
+/// Claude Code 2.1.292 の cedar_ember レスポンスに対応する。
+/// 不明な状態を「残り0回」や「実行可能」と推測しない。
+struct ClaudeResetStatus: Decodable, Equatable {
+    let eligible: Bool
+    let atLimit: Bool?
+    let grants: [ClaudeResetGrant]
+    let nextGrantID: String?
+    let cooldownUntil: Date?
+
+    enum CodingKeys: String, CodingKey {
+        case eligible, grants
+        case atLimit = "at_limit"
+        case nextGrantID = "next_grant_id", cooldownUntil = "cooldown_until"
+    }
+
+    func remainingGrants(at now: Date = Date()) -> [ClaudeResetGrant] {
+        grants.filter { $0.resetsLeft > 0 && ($0.endsAt == nil || $0.endsAt! > now) }
+            .sorted { ($0.endsAt ?? .distantFuture) < ($1.endsAt ?? .distantFuture) }
+    }
+
+    /// 接続元の制限などで eligible=false の場合、空の grants は残数ゼロを意味しない。
+    func remainingCount(at now: Date = Date()) -> Int? {
+        guard eligible else { return nil }
+        return remainingGrants(at: now).reduce(0) { $0 + $1.resetsLeft }
+    }
+
+    func usableGrant(at now: Date = Date()) -> ClaudeResetGrant? {
+        guard eligible, cooldownUntil == nil || cooldownUntil! <= now else { return nil }
+        return remainingGrants(at: now).first {
+            $0.id == nextGrantID && $0.usableNow && !$0.paused && !$0.clears.isEmpty
+                && ($0.useRequiresLimit != true || atLimit == true)
+                && ($0.startsAt == nil || $0.startsAt! <= now)
+                && $0.id.range(of: #"^[a-z0-9_-]{1,40}$"#, options: .regularExpression) != nil
+        }
+    }
+
+    static func decode(from root: [String: Any]) -> ClaudeResetStatus? {
+        guard let block = root["cedar_ember"] as? [String: Any],
+              let data = try? JSONSerialization.data(withJSONObject: block) else { return nil }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .custom { decoder in
+            let value = try decoder.singleValueContainer().decode(String.self)
+            let formatter = ISO8601DateFormatter()
+            formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            if let date = formatter.date(from: value) { return date }
+            formatter.formatOptions = [.withInternetDateTime]
+            guard let date = formatter.date(from: value) else {
+                throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "Invalid reset date"))
+            }
+            return date
+        }
+        guard let status = try? decoder.decode(Self.self, from: data),
+              status.grants.allSatisfy({ $0.resetsLeft >= 0 }),
+              Set(status.grants.map(\.id)).count == status.grants.count else { return nil }
+        return status
+    }
+}
+
+struct ClaudeResetGrant: Decodable, Equatable {
+    let id: String
+    let label: String?
+    let resetsLeft: Int
+    let startsAt: Date?
+    let endsAt: Date?
+    let clears: [String]
+    let paused: Bool
+    let usableNow: Bool
+    /// true の権利は上限に達している時だけ使える。
+    let useRequiresLimit: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case id, label, clears, paused
+        case resetsLeft = "resets_left", startsAt = "starts_at", endsAt = "ends_at"
+        case usableNow = "usable_now", useRequiresLimit = "use_requires_limit"
+    }
+
+    var limitsLabel: String {
+        clears.map {
+            switch $0 {
+            case "five_hour": return "5h"
+            case "seven_day": return "7d"
+            case "seven_day_overage_included": return "7d Fable"
+            case "seven_day_opus": return "7d Opus"
+            case "seven_day_sonnet": return "7d Sonnet"
+            case "seven_day_cowork": return "7d Cowork"
+            case "seven_day_oauth_apps": return "7d OAuth apps"
+            default: return $0
+            }
+        }.joined(separator: " / ")
     }
 }
 

@@ -11,6 +11,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     /// 取得はせず、リセット時刻を跨いだ時に表示だけ作り直すためのタイマー。
     private var staleDisplayTimer: Timer?
     private let fetcher = UsageFetcher()
+    private let claudeLimitReset = ClaudeLimitReset()
     private let codexFetcher = CodexUsageFetcher()
     private var latest: UsageSnapshot?
     private var latestCodex: CodexUsageSnapshot?
@@ -19,6 +20,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private var isLoadingClaude = false
     private var isLoadingCodex = false
     private var isResettingCodexUsage = false
+    private var isResettingClaudeUsage = false
+    private var claudeServiceGeneration = 0
+    private var claudeResetMessage: String?
     private var nextClaudeAutoRefreshAt: Date?
     private var nextCodexAutoRefreshAt: Date?
     /// 最後に「実際の取得が失敗した」理由。成功した時だけ nil に戻す。
@@ -185,6 +189,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         if !services.isEmpty {
             addAction(to: menu, title: "\(services)の残量を手動で更新", selector: #selector(refreshAction), key: "r")
         }
+        if config.claudeEnabled { addClaudeResetAction(to: menu) }
         if config.codexEnabled { addCodexResetAction(to: menu) }
         addSettingsSubmenu(to: menu)
 
@@ -232,6 +237,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         }
         item.toolTip = "メニューバーに表示する枠を1〜2個選択（2個なら縦に表示）"
         menu.addItem(item)
+    }
+
+    private func addClaudeResetAction(to menu: NSMenu) {
+        if isResettingClaudeUsage {
+            addDisabledItem(to: menu, title: "Claude 使用量をリセット中…")
+            return
+        }
+        guard let status = latest?.claudeResetStatus else {
+            addAction(to: menu, title: "Claude リセット: Webで利用可否を確認…", selector: #selector(openClaudeUsageSettingsAction), key: "")
+            return
+        }
+        guard let count = status.remainingCount() else {
+            addAction(to: menu, title: "Claude リセット: この接続では確認不可（Webで確認…）", selector: #selector(openClaudeUsageSettingsAction), key: "")
+            return
+        }
+        let grants = status.remainingGrants()
+        var title = "Claude リセット: 残り\(count)回"
+        if let expiry = grants.first?.endsAt {
+            title += " · 最短期限 \(formatMonthDayTime(expiry))"
+        }
+        let parent = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        let submenu = NSMenu()
+        let usable = status.usableGrant()
+        for grant in grants {
+            let canUse = grant == usable && !isLoadingClaude && lastClaudeFetchFailure == nil
+            let item = NSMenuItem(
+                title: "\(grant.limitsLabel) · 残り\(grant.resetsLeft)回 · \(grant.endsAt.map { "期限 \(formatMonthDayTime($0))" } ?? "期限なし")\(canUse ? "" : "（現在利用不可）")",
+                action: canUse ? #selector(resetClaudeUsageAction(_:)) : nil,
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.representedObject = grant.id
+            item.toolTip = grant.label
+            item.isEnabled = canUse
+            submenu.addItem(item)
+        }
+        if let claudeResetMessage {
+            addDisabledItem(to: submenu, title: claudeResetMessage)
+        }
+        parent.submenu = submenu
+        menu.addItem(parent)
     }
 
     private func addCodexResetAction(to menu: NSMenu) {
@@ -799,6 +845,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     }
 
     private func setClaudeEnabled(_ enabled: Bool) {
+        claudeServiceGeneration += 1
+        claudeResetMessage = nil
         config.claudeEnabled = enabled
         config.save()
         if config.claudeEnabled {
@@ -901,6 +949,69 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                     self.latestCodexError = "リセット失敗: \((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)"
                     self.updateTitle()
                     self.rebuildMenu()
+                }
+            }
+        }
+    }
+
+    @objc private func openClaudeUsageSettingsAction() {
+        NSWorkspace.shared.open(URL(string: "https://claude.ai/settings/usage")!)
+    }
+
+    @objc private func resetClaudeUsageAction(_ sender: NSMenuItem) {
+        guard config.claudeEnabled, !isResettingClaudeUsage, !isLoadingClaude,
+              lastClaudeFetchFailure == nil,
+              let grant = latest?.claudeResetStatus?.usableGrant(),
+              sender.representedObject as? String == grant.id,
+              let digest = latest?.credentialDigest else { return }
+        let generation = claudeServiceGeneration
+        let alert = NSAlert()
+        alert.messageText = "Claude 使用量をリセットしますか？"
+        let expiry = grant.endsAt.map { "有効期限: \(formatMonthDayTime($0))。\n" } ?? ""
+        alert.informativeText = "対象: \(grant.limitsLabel)。リセット権を1回消費します（この権利は残り\(grant.resetsLeft)回）。\n\(expiry)残量がある場合も回復できます。通常の週間リセット日時は変わりません。この操作は取り消せません。"
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "リセット")
+        alert.addButton(withTitle: "キャンセル")
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn,
+              config.claudeEnabled, generation == claudeServiceGeneration,
+              !isLoadingClaude, !isResettingClaudeUsage else { return }
+
+        isResettingClaudeUsage = true
+        claudeResetMessage = nil
+        claudeTimer?.invalidate()
+        claudeTimer = nil
+        nextClaudeAutoRefreshAt = nil
+        rebuildMenu()
+        Task { [weak self] in
+            guard let self else { return }
+            var failure: String?
+            do {
+                try await self.claudeLimitReset.consume(grant: grant, credentialDigest: digest)
+            } catch {
+                failure = error.localizedDescription
+            }
+            let message = failure
+            await MainActor.run {
+                self.isResettingClaudeUsage = false
+                guard self.config.claudeEnabled else { return }
+                guard generation == self.claudeServiceGeneration else {
+                    self.refreshClaude()
+                    return
+                }
+                self.claudeResetMessage = message == nil ? "リセット済み（使用量を再取得）" : "リセット結果を確認してください"
+                self.lastClaudeFetchFailure = "リセット操作後の使用量を再取得しています。"
+                self.refreshClaude()
+                if let message {
+                    let result = NSAlert()
+                    result.messageText = "Claude リセットを確認してください"
+                    result.informativeText = message
+                    result.addButton(withTitle: "OK")
+                    result.addButton(withTitle: "使用量設定を開く")
+                    NSApp.activate(ignoringOtherApps: true)
+                    if result.runModal() == .alertSecondButtonReturn {
+                        self.openClaudeUsageSettingsAction()
+                    }
                 }
             }
         }
@@ -1043,7 +1154,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     }
 
     private func refreshClaude(isAutomatic: Bool = false, forceRejectedTokenRetry: Bool = false) {
-        guard config.claudeEnabled, !isLoadingClaude else { return }
+        guard config.claudeEnabled, !isLoadingClaude, !isResettingClaudeUsage else { return }
         if isAutomatic && !isInAutoRefreshWindow() {
             latestError = "自動更新は JST \(config.autoRefreshWindowLabel) のみ"
             // 仕様通りの休止であって取得ではない。`lastClaudeFetchFailure` は

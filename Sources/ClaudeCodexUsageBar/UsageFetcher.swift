@@ -32,7 +32,8 @@ import Foundation
 final class UsageFetcher {
 
     private let session: URLSession
-    private let claudeOAuthUsageURL = URL(string: "https://api.anthropic.com/api/oauth/usage")!
+    // skip_spend は付けず、既存の Extra 枠も取得する。
+    private let claudeOAuthUsageURL = URL(string: "https://api.anthropic.com/api/oauth/usage?cedar_ember=1")!
     private var cachedClaudeOAuthCredentials: ClaudeOAuthCredentials?
     /// 401 で拒否されたアクセストークンのダイジェスト。
     ///
@@ -208,7 +209,9 @@ final class UsageFetcher {
         return UsageSnapshot(
             plan: credentials.subscriptionType ?? credentials.rateLimitTier ?? extractPlan(from: json),
             tracks: tracks,
-            fetchedAt: Date()
+            fetchedAt: Date(),
+            claudeResetStatus: ClaudeResetStatus.decode(from: json),
+            credentialDigest: credentials.accessTokenDigest
         )
     }
 
@@ -219,7 +222,7 @@ final class UsageFetcher {
         req.setValue("application/json", forHTTPHeaderField: "Accept")
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
-        req.setValue("claude-code/2.1.0", forHTTPHeaderField: "User-Agent")
+        for (field, value) in ClaudeCLIHeaders.values { req.setValue(value, forHTTPHeaderField: field) }
 
         do {
             let (data, response) = try await session.data(for: req)
