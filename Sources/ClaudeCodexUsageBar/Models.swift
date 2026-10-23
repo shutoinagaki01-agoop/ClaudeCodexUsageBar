@@ -123,6 +123,8 @@ struct UsageSnapshot: Equatable {
 /// 不明な状態を「残り0回」や「実行可能」と推測しない。
 struct ClaudeResetStatus: Decodable, Equatable {
     let eligible: Bool
+    /// "no_grant" は権利なし（残り0回）。"surface" などは残数を判断できない。
+    let ineligibleReason: String?
     let atLimit: Bool?
     let grants: [ClaudeResetGrant]
     let nextGrantID: String?
@@ -130,7 +132,7 @@ struct ClaudeResetStatus: Decodable, Equatable {
 
     enum CodingKeys: String, CodingKey {
         case eligible, grants
-        case atLimit = "at_limit"
+        case atLimit = "at_limit", ineligibleReason = "ineligible_reason"
         case nextGrantID = "next_grant_id", cooldownUntil = "cooldown_until"
     }
 
@@ -141,7 +143,7 @@ struct ClaudeResetStatus: Decodable, Equatable {
 
     /// 接続元の制限などで eligible=false の場合、空の grants は残数ゼロを意味しない。
     func remainingCount(at now: Date = Date()) -> Int? {
-        guard eligible else { return nil }
+        guard eligible else { return ineligibleReason == "no_grant" ? 0 : nil }
         return remainingGrants(at: now).reduce(0) { $0 + $1.resetsLeft }
     }
 

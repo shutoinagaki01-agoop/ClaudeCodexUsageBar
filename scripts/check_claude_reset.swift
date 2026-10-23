@@ -57,6 +57,13 @@ struct ClaudeResetChecks {
             "grants": [], "next_grant_id": NSNull(),
         ]))!
         precondition(knownEmpty.remainingCount(at: now) == 0)
+        // 実際の権利なし応答。eligible=false でも残数0回と判断できる。
+        let noGrant = ClaudeResetStatus.decode(from: root(overrides: [
+            "eligible": false, "ineligible_reason": "no_grant",
+            "grants": [], "next_grant_id": NSNull(),
+        ]))!
+        precondition(noGrant.remainingCount(at: now) == 0)
+        precondition(noGrant.usableGrant(at: now) == nil)
         precondition(ClaudeResetStatus.decode(from: [:]) == nil)
         precondition(ClaudeResetStatus.decode(from: ["cedar_ember": NSNull()]) == nil)
         precondition(ClaudeResetStatus.decode(from: ["cedar_ember": "bad"]) == nil)

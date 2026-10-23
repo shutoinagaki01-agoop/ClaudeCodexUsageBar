@@ -257,6 +257,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         if let expiry = grants.first?.endsAt {
             title += " · 最短期限 \(formatMonthDayTime(expiry))"
         }
+        guard !grants.isEmpty || claudeResetMessage != nil else {
+            addDisabledItem(to: menu, title: title)
+            return
+        }
         let parent = NSMenuItem(title: title, action: nil, keyEquivalent: "")
         let submenu = NSMenu()
         let usable = status.usableGrant()
